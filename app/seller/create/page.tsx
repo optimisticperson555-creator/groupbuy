@@ -38,6 +38,8 @@ export default function CreateDealPage() {
               tiers: [{ minUnits: 1, unitPrice: 0 }],
               votingDays: getSetting(db, "votingPeriodDefaultDays"),
               maxUnitsPerBuyer: null,
+              maxTotalUnits: null,
+              parcelWeightGrams: 0,
             }}
           />
         )}

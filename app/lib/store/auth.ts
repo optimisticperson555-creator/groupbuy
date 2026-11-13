@@ -114,6 +114,7 @@ export function register(input: RegisterInput): Result {
       phone: "",
       status: "active",
       votingRestrictedUntil: null,
+      referredBy: null,
       createdAt,
     });
     if (input.role === "seller") {
@@ -123,6 +124,10 @@ export function register(input: RegisterInput): Result {
         description: "",
         applicationStatus: "pending",
         commissionRate: null,
+        proUntil: null,
+        bankAccount: null,
+        payoutHoldAt: null,
+        payoutHoldReason: null,
         rejectionReason: null,
         createdAt,
       });

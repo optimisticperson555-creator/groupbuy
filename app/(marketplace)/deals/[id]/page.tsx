@@ -7,8 +7,10 @@ import Countdown from "../../../components/deals/Countdown";
 import TierProgress from "../../../components/deals/TierProgress";
 import Icon from "../../../components/shell/Icon";
 import PaymentStatusBox from "../../../components/deals/PaymentStatusBox";
+import ShareDeal, { InvitedBanner } from "../../../components/deals/ShareDeal";
 import { BackLink, EmptyState, Skeleton } from "../../../components/ui";
 import { findDealSummary, formatDateTime, formatTHB, useDb, useSessionUser, voteFor } from "../../../lib/store";
+import { lowestShippingFee } from "../../../lib/shipping";
 import VotePanel from "./VotePanel";
 
 function DealSkeleton() {
@@ -22,6 +24,46 @@ function DealSkeleton() {
         <Skeleton className="mt-8 h-24" />
         <Skeleton className="mt-6 h-64" />
       </div>
+    </div>
+  );
+}
+
+/** Latest reviews of the seller, from buyers who received their orders. */
+function ShopReviews({ sellerId, shopName }: { sellerId: string; shopName: string }) {
+  const db = useDb();
+  const reviews = useMemo(
+    () =>
+      db
+        ? db.reviews
+            .filter((review) => review.sellerId === sellerId)
+            .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+            .slice(0, 4)
+            .map((review) => ({ review, name: db.profiles.find((row) => row.id === review.buyerId)?.fullName ?? "Buyer" }))
+        : [],
+    [db, sellerId]
+  );
+  return (
+    <div id="reviews" className="mt-6 scroll-mt-24 rounded-sheet bg-surface p-6 shadow-sm">
+      <h2 className="text-lg font-extrabold">Reviews of {shopName}</h2>
+      {reviews.length === 0 ? (
+        <p className="mt-3 text-sm text-muted">No reviews yet. Buyers can review after their order is delivered.</p>
+      ) : (
+        <ul className="mt-4 space-y-4">
+          {reviews.map(({ review, name }) => (
+            <li key={review.id} className="border-b border-line pb-4 last:border-0 last:pb-0">
+              <p className="text-sm">
+                <span className="font-bold text-brand-600" aria-label={`${review.rating} out of 5 stars`}>
+                  {"★".repeat(review.rating)}
+                  <span className="text-line">{"★".repeat(5 - review.rating)}</span>
+                </span>{" "}
+                <span className="font-bold">{name}</span>{" "}
+                <span className="text-xs text-subtle">· {formatDateTime(review.createdAt)}</span>
+              </p>
+              {review.comment && <p className="mt-1 text-sm leading-6 text-muted-strong">{review.comment}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -56,6 +98,7 @@ export default function DealPage() {
         </div>
       ) : (
         <>
+          <InvitedBanner dealId={summary.deal.id} user={user} />
           {["draft", "pending_review", "rejected"].includes(summary.deal.status) && (
             <p className="mt-6 rounded-2xl bg-brand-50 p-4 text-sm font-semibold text-brand-700">
               Preview — buyers can&apos;t see this deal until it is approved and live.
@@ -84,6 +127,17 @@ export default function DealPage() {
                   </Link>
                 )}
                 <span className="text-muted">by {summary.shopName}</span>
+                {summary.shopRating.count > 0 && (
+                  <a href="#reviews" className="font-bold text-brand-600">
+                    ★ {summary.shopRating.average.toFixed(1)} · {summary.shopRating.count}{" "}
+                    {summary.shopRating.count === 1 ? "review" : "reviews"}
+                  </a>
+                )}
+                {(summary.boosted || summary.sponsored) && (
+                  <span className="rounded-full bg-surface-muted px-2.5 py-0.5 text-xs font-bold text-muted-strong">
+                    {summary.sponsored ? "Sponsored" : "Boosted"}
+                  </span>
+                )}
               </div>
 
               <h1 className="mt-4 text-3xl font-extrabold sm:text-4xl">{summary.deal.title}</h1>
@@ -99,7 +153,15 @@ export default function DealPage() {
                   </p>
                 )}
               </div>
-              <p className="mt-1 text-sm text-muted">{locked ? "Final price per unit · locked when voting closed" : "Current price per unit"}</p>
+              <p className="mt-1 text-sm text-muted">
+                {locked ? "Final price per unit · locked when voting closed" : "Current price per unit"} ·{" "}
+                <span className="inline-flex items-center gap-1 font-semibold text-muted-strong">
+                  <Icon name="truck" className="h-4 w-4" />+ shipping from {formatTHB(lowestShippingFee(summary.deal.parcelWeightGrams))}
+                </span>
+                <span className="block text-xs text-subtle">
+                  The exact shipping fee is quoted at payment, from your address and the parcel weight.
+                </span>
+              </p>
 
               {/* LIVE PROGRESS */}
               <div className="mt-6 rounded-sheet bg-surface p-6 shadow-sm">
@@ -174,10 +236,18 @@ export default function DealPage() {
                 <VotePanel key={user?.id ?? "guest"} summary={summary} user={user} />
               </div>
 
+              {summary.deal.status === "live" && !summary.closedReason && (
+                <div className="mt-6">
+                  <ShareDeal summary={summary} user={user} />
+                </div>
+              )}
+
               <div className="mt-6 rounded-sheet bg-surface p-6 shadow-sm">
                 <h2 className="text-lg font-extrabold">About this product</h2>
                 <p className="mt-3 whitespace-pre-line leading-7 text-muted-strong">{summary.deal.description}</p>
               </div>
+
+              <ShopReviews sellerId={summary.deal.sellerId} shopName={summary.shopName} />
             </div>
           </div>
         </>

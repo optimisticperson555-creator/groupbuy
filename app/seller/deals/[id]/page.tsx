@@ -9,13 +9,19 @@ import PaymentStatusBox from "../../../components/deals/PaymentStatusBox";
 import TierProgress from "../../../components/deals/TierProgress";
 import Icon from "../../../components/shell/Icon";
 import { BackLink, EmptyState, Skeleton, StatCard } from "../../../components/ui";
+import ShareDeal from "../../../components/deals/ShareDeal";
+import { formatWeight } from "../../../lib/shipping";
 import {
   ActionResult,
   cancelDeal,
+  commissionOn,
+  dealCommissionRate,
   deleteDraft,
   findDealSummary,
   formatDateTime,
   formatTHB,
+  percent,
+  sellerKeeps,
   proceedDeal,
   submitDealForReview,
   useDb,
@@ -65,7 +71,7 @@ export default function SellerDealPage() {
   const orders = db ? db.orders.filter((order) => order.dealId === deal.id) : [];
   const revenue = orders.reduce((sum, order) => sum + order.total, 0);
   const commission = orders.reduce((sum, order) => sum + order.commissionAmount, 0);
-  const refunded = orders.reduce((sum, order) => sum + order.refundedAmount, 0);
+  const kept = orders.reduce((sum, order) => sum + sellerKeeps(order), 0);
 
   function remove() {
     if (window.confirm("Delete this deal? This can't be undone.")) {
@@ -93,6 +99,10 @@ export default function SellerDealPage() {
             {summary.category ? `${summary.category.name} · ` : ""}
             {deal.votingDays}-day vote
             {deal.maxUnitsPerBuyer ? ` · max ${deal.maxUnitsPerBuyer} per buyer` : " · no per-buyer limit"}
+            {` · ${formatWeight(deal.parcelWeightGrams)} per unit`}
+            {deal.maxTotalUnits !== null && ` · stock cap ${deal.maxTotalUnits} (${summary.unitsLeft} left)`}
+            {db &&
+              ` · ${percent(dealCommissionRate(db, deal))} commission ${deal.commissionRate === null ? "(confirmed when approved)" : "(locked)"}`}
           </p>
 
           <div className="mt-5 flex flex-wrap gap-3">
@@ -124,14 +134,27 @@ export default function SellerDealPage() {
               </button>
             )}
             {deal.status === "live" && (
-              <Link href={`/deals/${deal.id}`} className="rounded-xl border border-line bg-surface px-5 py-3 text-sm font-bold hover:border-brand-400">
-                View buyer page ↗
-              </Link>
+              <>
+                <Link href={`/deals/${deal.id}`} className="rounded-xl border border-line bg-surface px-5 py-3 text-sm font-bold hover:border-brand-400">
+                  View buyer page ↗
+                </Link>
+                {!summary.closedReason && (
+                  <Link href="/seller/plan" className="rounded-xl bg-ink px-5 py-3 text-sm font-bold text-white hover:bg-brand-500">
+                    {summary.boosted ? "Boosted" : "Boost or sponsor"}
+                  </Link>
+                )}
+              </>
             )}
           </div>
           {error && <p role="alert" className="mt-3 text-sm font-semibold text-danger">{error}</p>}
         </div>
       </div>
+
+      {deal.status === "live" && !summary.closedReason && (
+        <div className="mt-6">
+          <ShareDeal summary={summary} user={user} />
+        </div>
+      )}
 
       {deal.status === "rejected" && deal.reviewNote && (
         <div className="mt-6 rounded-2xl border border-brand-200 bg-brand-50 p-5">
@@ -154,7 +177,18 @@ export default function SellerDealPage() {
             {summary.units} units voted → {formatTHB(deal.lockedUnitPrice)} per unit
           </h2>
           <p className="mt-2 text-muted-strong">
-            Up to <b>{formatTHB(deal.lockedUnitPrice * summary.units)}</b> if every voter pays. {summary.voters}{" "}
+            Up to <b>{formatTHB(deal.lockedUnitPrice * summary.units)}</b> if every voter pays
+            {db && (
+              <>
+                {" "}(you receive{" "}
+                {formatTHB(
+                  deal.lockedUnitPrice * summary.units -
+                    commissionOn(deal.lockedUnitPrice * summary.units, dealCommissionRate(db, deal))
+                )}{" "}
+                after {percent(dealCommissionRate(db, deal))} commission)
+              </>
+            )}
+            . {summary.voters}{" "}
             {summary.voters === 1 ? "buyer" : "buyers"} will be asked to confirm and pay.
           </p>
           <p className="mt-4 inline-block rounded-full bg-surface px-4 py-2 text-sm font-bold text-brand-600 shadow-sm">
@@ -202,7 +236,7 @@ export default function SellerDealPage() {
             <StatCard label="Paid orders" value={orders.length} tone="brand" />
             <StatCard label="Order total" value={formatTHB(revenue)} />
             <StatCard label="Commission" value={formatTHB(commission)} />
-            <StatCard label="Your earnings" value={formatTHB(revenue - refunded - commission)} tone="success" />
+            <StatCard label="Your earnings" value={formatTHB(kept - commission)} tone="success" />
           </div>
           {deal.status !== "payment_window" && orders.length > 0 && (
             <Link

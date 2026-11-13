@@ -36,11 +36,29 @@ export function describeNotification(db: Db, notification: Notification, role: U
       };
     case "deal_cancelled":
       return { icon: "ban", title: "Deal cancelled", body: `${title} won't go ahead. Nobody was charged.`, href: "/my-groups" };
+    case "payment_reminder":
+      return {
+        icon: "bell",
+        title: `Reminder: about ${payload.hoursLeft} hours left to pay`,
+        body: `${title}: confirm and pay, or tap "No, cancel". Also sent by LINE and email (simulated).`,
+        href: `/pay/${dealId}`,
+      };
+    case "referral_reward":
+      return {
+        icon: "gift",
+        title: `${formatTHB(Number(payload.amount) || 0)} credit added`,
+        body: payload.friend
+          ? `${payload.friendName ?? "Your friend"} joined through your invite link and paid their first order.`
+          : "Thanks for joining through a friend's invite. Use it on your next payment.",
+        href: "/my-groups",
+      };
     case "order_shipped":
       return {
         icon: "truck",
         title: "Your order has shipped",
-        body: payload.trackingNumber ? `${title} · tracking ${payload.trackingNumber}` : `${title} is on its way.`,
+        body: payload.trackingNumber
+          ? `${title} · ${payload.courier ? `${payload.courier} ` : ""}tracking ${payload.trackingNumber}`
+          : `${title} is on its way.`,
         href: `/orders/${orderId}`,
       };
     case "delivery_auto_confirmed":
@@ -92,22 +110,64 @@ export function describeNotification(db: Db, notification: Notification, role: U
       return { icon: "done", title: "Order delivered", body: `An order of ${title} was delivered and is now payable.`, href: "/seller/earnings" };
     case "deal_completed":
       return { icon: "flag", title: "Deal completed", body: `Every order of ${title} is delivered or refunded.`, href: sellerDeal };
+    case "review_received":
+      return {
+        icon: "sparkles",
+        title: `New ${payload.rating}-star review`,
+        body: `A buyer reviewed ${title}.`,
+        href: "/seller/orders",
+      };
     case "payout_sent":
-      return { icon: "banknote", title: "Payout sent", body: `${formatTHB(Number(payload.amount) || 0)} is on its way to you.`, href: "/seller/earnings" };
+      return {
+        icon: "banknote",
+        title: "Payout sent",
+        body: `${formatTHB(Number(payload.amount) || 0)} was released to your bank account by 2C2P (simulated).`,
+        href: "/seller/earnings",
+      };
+    case "payout_failed":
+      return {
+        icon: "alert",
+        title: "Payout couldn't be sent",
+        body: `${formatTHB(Number(payload.amount) || 0)} is waiting: add your bank account and it's sent automatically.`,
+        href: "/seller/earnings",
+      };
+    case "payouts_held":
+      return { icon: "pause", title: "Payouts on hold", body: `GroupBuy paused your payouts: ${payload.reason}`, href: "/seller/earnings" };
+    case "payouts_released":
+      return { icon: "done", title: "Payouts resumed", body: "Your held payouts are being released.", href: "/seller/earnings" };
 
     // Shared
     case "dispute_opened":
       return {
         icon: "alert",
         title: "A buyer reported a problem",
-        body: `${title}: an admin will review it.`,
-        href: role === "admin" ? "/admin/disputes" : "/seller/orders",
+        body: `${title}: offer a refund or reply${payload.respondBy ? ` by ${formatDate(String(payload.respondBy))}` : ""}, or it goes to an admin.`,
+        href: "/seller/orders",
+      };
+    case "dispute_offer": {
+      const offer = Number(payload.refundAmount) || 0;
+      return {
+        icon: "message",
+        title: "The seller answered your report",
+        body: `${title}: ${offer ? `they offer a ${formatTHB(offer)} refund` : "they replied without a refund"}. Accept it or ask an admin to decide.`,
+        href: orderId ? `/orders/${orderId}` : "/orders",
+      };
+    }
+    case "dispute_escalated":
+      return {
+        icon: "scale",
+        title: role === "admin" ? "A report needs your decision" : "Report sent to an admin",
+        body:
+          payload.reason === "seller_timeout"
+            ? `${title}: the seller didn't answer in time.`
+            : `${title}: the buyer didn't accept the seller's offer.`,
+        href: role === "admin" ? "/admin/disputes" : role === "buyer" && orderId ? `/orders/${orderId}` : "/seller/orders",
       };
     case "dispute_resolved": {
       const refund = Number(payload.refundAmount) || 0;
       return {
         icon: "peace",
-        title: "Dispute resolved",
+        title: "Report resolved",
         body: `${title}: ${refund ? `${formatTHB(refund)} refunded. ` : "no refund. "}${payload.resolution ?? ""}`,
         href: role === "buyer" && orderId ? `/orders/${orderId}` : "/seller/orders",
       };

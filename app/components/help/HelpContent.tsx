@@ -55,7 +55,7 @@ const STEPS: [IconName, string, string][] = [
   ["search", "Find a deal", "Pick a product and see every price tier up front, with live progress and the deadline."],
   ["vote", "Vote for free", "Choose how many units you want. No payment details needed, and you can change or withdraw your vote until voting closes."],
   ["lock", "Price locks", "When voting closes, the tier reached by all units voted sets one final price for everyone."],
-  ["truck", "Pay & receive", "Confirm and pay the final price with PromptPay or card, then the seller ships to your address."],
+  ["truck", "Pay & receive", "Confirm and pay the final price with PromptPay, card or TrueMoney Wallet, then the seller ships to your address."],
 ];
 
 export function HowItWorks() {
@@ -90,7 +90,19 @@ const FAQ: [string, string][] = [
     "What happens if I don't pay?",
     "Tap “No, cancel” if you don't want the deal; that never counts against you. Ignoring the payment request counts as a missed confirmation, and three in 90 days pause voting for 30 days.",
   ],
-  ["How do I pay?", "PromptPay or a credit/debit card, charged once you confirm."],
+  ["How do I pay?", "PromptPay, a credit/debit card or TrueMoney Wallet, through the 2C2P payment gateway. Your payment is held until your order is delivered."],
+  [
+    "How do referral credits work?",
+    "Share a deal with your invite link. When a friend joins through it and pays their first order, you each get ฿10 credit, applied at your next payment.",
+  ],
+  [
+    "What if a deal is full?",
+    "Some sellers set a stock cap. Once votes reach it the deal shows as full; units open up again if someone withdraws before voting closes.",
+  ],
+  [
+    "How much is shipping?",
+    "Deal pages show the lowest shipping fee. The exact fee is quoted when you pay, from the parcel weight and your address, and added to the product price.",
+  ],
   [
     "How do I become a seller?",
     "Choose “Seller” when you create an account. Our team reviews every shop before it can list deals.",
@@ -115,9 +127,10 @@ export function Faq() {
 
 const POLICIES: [IconName, string, string][] = [
   ["truck", "Delivery", "Each seller ships your order to your address after the payment window closes, with tracking when available."],
+  ["weight", "Shipping fee", "Paid on top of the product price. The courier quotes it when you pay, from the parcel weight and your address. Several units ship as one parcel."],
   ["delivered", "Confirm delivery", "Tap “Yes, it arrived” when it's with you. Orders are confirmed automatically 7 days after shipping."],
-  ["help", "Report a problem", "Not delivered, damaged or the wrong item? Report it from your order and our team will step in."],
-  ["coins", "Refunds", "Approved refunds go back to your original payment method, in full or in part."],
+  ["help", "Report a problem", "Not delivered, damaged or the wrong item? Report it from your order. The seller has 3 days to offer a refund or reply; if you can't agree, our team decides."],
+  ["coins", "Refunds", "Refunds go back to your original payment method, in full or in part. A full refund includes shipping."],
 ];
 
 export function ShippingRefunds() {

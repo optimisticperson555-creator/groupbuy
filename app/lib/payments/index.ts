@@ -1,13 +1,20 @@
 /**
  * Payment provider boundary. Everything that talks to a payment provider goes
- * through this module so the provider can be swapped (Stripe or Opn Payments
- * are the candidates). For now it is a mock that charges instantly.
+ * through this module so the provider can be swapped. The report chooses the
+ * 2C2P gateway (PromptPay, cards, TrueMoney Wallet), which holds each payment
+ * until delivery. For now this simulates 2C2P and charges instantly.
  *
  * A real provider is asynchronous and confirms PromptPay through a webhook;
  * when one is added, charge() becomes async and the store's pay action awaits it.
  */
 
-export type PaymentMethod = "promptpay" | "card";
+export type PaymentMethod = "promptpay" | "card" | "truemoney";
+
+export const METHOD_LABELS: Record<PaymentMethod, string> = {
+  promptpay: "PromptPay QR",
+  card: "Credit / debit card",
+  truemoney: "TrueMoney Wallet",
+};
 
 export type CardDetails = { number: string; expiry: string; cvc: string };
 
@@ -16,11 +23,14 @@ export type ChargeRequest = {
   /** Satang */
   amount: number;
   card?: CardDetails;
+  /** TrueMoney Wallet phone number */
+  walletPhone?: string;
 };
 
 export type ChargeResult = { ok: true; providerRef: string } | { ok: false; error: string };
 
-export const PROVIDER = "mock" as const;
+export const PROVIDER = "2c2p" as const;
+export const PROVIDER_LABEL = "2C2P (simulated)";
 
 /** Mock test cards, in the style of real provider test modes. */
 export const TEST_CARDS = {
@@ -48,7 +58,7 @@ function validCard(card: CardDetails): string | null {
 }
 
 function reference() {
-  return `mock_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `2c2p_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function charge(request: ChargeRequest): ChargeResult {
@@ -67,6 +77,10 @@ export function charge(request: ChargeRequest): ChargeResult {
     if (digits(request.card.number) === digits(TEST_CARDS.declined)) {
       return { ok: false, error: "Your card was declined. Try another card or PromptPay." };
     }
+  }
+
+  if (request.method === "truemoney" && !/^0\d{9}$/.test(digits(request.walletPhone ?? ""))) {
+    return { ok: false, error: "Enter the 10-digit phone number of your TrueMoney Wallet." };
   }
 
   return { ok: true, providerRef: reference() };

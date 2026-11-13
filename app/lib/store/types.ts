@@ -29,6 +29,8 @@ export type Profile = {
   phone: string;
   status: "active" | "suspended";
   votingRestrictedUntil: IsoDate | null;
+  /** The buyer whose invite link brought this buyer in (set on their first vote) */
+  referredBy: string | null;
   createdAt: IsoDate;
 };
 
@@ -42,6 +44,13 @@ export type SellerProfile = {
   applicationStatus: SellerApplicationStatus;
   /** null means the platform default from settings */
   commissionRate: BasisPoints | null;
+  /** Pro plan (simulated subscription) is active until this time */
+  proUntil: IsoDate | null;
+  /** Where 2C2P sends this seller's payouts, e.g. "KBank •••• 1234"; null until the seller adds one */
+  bankAccount: string | null;
+  /** Admin hold: automatic payouts stop until the admin releases them */
+  payoutHoldAt: IsoDate | null;
+  payoutHoldReason: string | null;
   rejectionReason: string | null;
   createdAt: IsoDate;
 };
@@ -93,6 +102,15 @@ export type Deal = {
   votingStartsAt: IsoDate | null;
   votingEndsAt: IsoDate | null;
   maxUnitsPerBuyer: number | null;
+  /** Stock cap: the most units the seller can supply. Voting stops accepting units at this total. */
+  maxTotalUnits: number | null;
+  /** Parcel weight of one unit in grams, used for the courier quote */
+  parcelWeightGrams: number;
+  /**
+   * Commission locked when the admin approves the deal: the admin's per-deal
+   * rate, else the seller's rate, else the platform default. null before approval.
+   */
+  commissionRate: BasisPoints | null;
   unitsVotedAtClose: number | null;
   lockedTierId: string | null;
   lockedUnitPrice: Satang | null;
@@ -131,6 +149,8 @@ export type Vote = {
   buyerId: string;
   quantity: number;
   status: VoteStatus;
+  /** Payment reminders already sent in the payment window */
+  reminders: number;
   respondedAt: IsoDate | null;
   createdAt: IsoDate;
   updatedAt: IsoDate;
@@ -148,11 +168,22 @@ export type Order = {
   sellerId: string;
   quantity: number;
   unitPrice: Satang;
+  /** Product total (unitPrice × quantity), without shipping. Commission is charged on this. */
   total: Satang;
-  /** Rate at the moment of payment; never changes */
+  /** Courier fee paid by the buyer on top of `total`; no commission on it */
+  shippingFee: Satang;
+  shippingCarrier: string;
+  /** Gateway fee on the amount charged, passed through to the seller (deducted from the payout) */
+  paymentFee: Satang;
+  /** Referral credit the buyer spent on this order; the platform covers it, the seller is paid in full */
+  creditUsed: Satang;
+  /** Courier the seller chose when creating the shipping label */
+  courier: CourierId | null;
+  /** The deal's commission rate, copied at payment; never changes */
   commissionRate: BasisPoints;
-  /** Commission on (total - refundedAmount); recalculated after a refund */
+  /** Commission on the product amount the seller keeps; recalculated after a refund */
   commissionAmount: Satang;
+  /** Everything returned to the buyer. Refunds come out of the product total first, then shipping. */
   refundedAmount: Satang;
   shippingAddress: ShippingAddressSnapshot;
   status: OrderStatus;
@@ -165,24 +196,34 @@ export type Order = {
   createdAt: IsoDate;
 };
 
+export type CourierId = "flash" | "kex" | "jt";
+
 export type Payment = {
   id: string;
   /** null for a failed attempt that created no order */
   orderId: string | null;
-  provider: "mock";
+  /** The 2C2P gateway, simulated */
+  provider: "2c2p" | "mock";
   providerRef: string;
-  method: "promptpay" | "card";
+  method: "promptpay" | "card" | "truemoney";
   amount: Satang;
   /** "refund" rows record money returned to the buyer */
   status: "succeeded" | "failed" | "refund";
   createdAt: IsoDate;
 };
 
+/**
+ * One payout per order, released automatically through 2C2P's split payment
+ * once the order is payable. "failed" rows record a release that couldn't be
+ * sent (e.g. no bank account); the order is retried automatically.
+ */
 export type Payout = {
   id: string;
   sellerId: string;
+  orderId: string | null;
   amount: Satang;
-  status: "pending" | "paid";
+  status: "paid" | "failed";
+  failureReason: string | null;
   paidAt: IsoDate | null;
   createdAt: IsoDate;
 };
@@ -194,18 +235,72 @@ export type NoShowEvent = {
   createdAt: IsoDate;
 };
 
+/**
+ * seller_review: the seller has `respondBy` to offer a refund or reply.
+ * awaiting_buyer: the buyer has `respondBy` to accept the offer or send it to an admin.
+ * escalated: an admin decides. resolved: closed.
+ */
+export type DisputeStatus = "seller_review" | "awaiting_buyer" | "escalated" | "resolved";
+
 export type Dispute = {
   id: string;
   orderId: string;
   openedBy: string;
   reason: "not_delivered" | "damaged" | "wrong_item" | "other";
   details: string;
-  status: "open" | "resolved";
+  status: DisputeStatus;
+  /** Deadline for whoever must act next (seller, then buyer) */
+  respondBy: IsoDate | null;
+  /** The seller's offer: 0 means a reply without a refund */
+  sellerOfferAmount: Satang | null;
+  sellerMessage: string | null;
+  sellerRespondedAt: IsoDate | null;
+  escalatedAt: IsoDate | null;
+  escalationReason: "buyer_rejected" | "seller_timeout" | null;
+  /** Buyer's note when sending the case to an admin */
+  buyerNote: string | null;
+  resolvedBy: "buyer_accepted" | "buyer_timeout" | "admin" | null;
   /** Order status when the dispute was opened, to return to if there is no full refund */
   orderStatusBefore: OrderStatus;
   resolution: string | null;
   resolvedAt: IsoDate | null;
   refundAmount: Satang | null;
+  createdAt: IsoDate;
+};
+
+/** Referral credits: + when earned, − when spent at payment. */
+export type CreditEntry = {
+  id: string;
+  userId: string;
+  amount: Satang;
+  reason: "referral_inviter" | "referral_friend" | "spent" | "refund";
+  /** The friend (for referral rewards) or the order (for spending) */
+  relatedId: string | null;
+  createdAt: IsoDate;
+};
+
+export type Review = {
+  id: string;
+  orderId: string;
+  dealId: string;
+  sellerId: string;
+  buyerId: string;
+  /** 1–5 stars */
+  rating: number;
+  comment: string;
+  createdAt: IsoDate;
+};
+
+/** Seller purchases of platform services (all simulated payments). */
+export type SellerPurchase = {
+  id: string;
+  sellerId: string;
+  kind: "boost" | "banner" | "pro";
+  /** The promoted deal (boost and banner) */
+  dealId: string | null;
+  amount: Satang;
+  startsAt: IsoDate;
+  endsAt: IsoDate;
   createdAt: IsoDate;
 };
 
@@ -228,7 +323,16 @@ export type SettingKey =
   | "noShowLookbackDays"
   | "noShowRestrictionDays"
   | "autoConfirmDeliveryDays"
-  | "defaultCommissionRate";
+  | "disputeResponseDays"
+  | "defaultCommissionRate"
+  | "paymentFeeRate"
+  | "referralCredit"
+  | "boostPrice"
+  | "boostDays"
+  | "bannerWeeklyPrice"
+  | "proMonthlyPrice"
+  | "basicActiveDeals"
+  | "proActiveDeals";
 
 export type Setting = {
   /** The setting key */
@@ -251,6 +355,9 @@ export type Tables = {
   payouts: Payout[];
   noShowEvents: NoShowEvent[];
   disputes: Dispute[];
+  credits: CreditEntry[];
+  reviews: Review[];
+  sellerPurchases: SellerPurchase[];
   notifications: Notification[];
   settings: Setting[];
 };

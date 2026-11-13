@@ -60,7 +60,7 @@ export default function OrdersPage() {
                 </p>
               </div>
               <div className="text-right">
-                <p className="text-xl font-extrabold">{formatTHB(order.total)}</p>
+                <p className="text-xl font-extrabold">{formatTHB(order.total + order.shippingFee)}</p>
                 {order.refundedAmount > 0 && (
                   <p className="text-xs font-bold text-success-600">{formatTHB(order.refundedAmount)} refunded</p>
                 )}

@@ -6,21 +6,22 @@ import { DEFAULT_SETTINGS, Db, getSetting, SETTING_LIMITS, SettingKey, updateSet
 
 const GROUPS: { title: string; keys: SettingKey[] }[] = [
   { title: "Voting", keys: ["votingPeriodMinDays", "votingPeriodMaxDays", "votingPeriodDefaultDays"] },
-  { title: "After voting", keys: ["sellerDecisionHours", "paymentWindowHours", "autoConfirmDeliveryDays"] },
+  { title: "After voting", keys: ["sellerDecisionHours", "paymentWindowHours", "autoConfirmDeliveryDays", "disputeResponseDays"] },
   { title: "No-shows", keys: ["noShowLimit", "noShowLookbackDays", "noShowRestrictionDays"] },
-  { title: "Money", keys: ["defaultCommissionRate"] },
+  { title: "Money", keys: ["defaultCommissionRate", "paymentFeeRate", "referralCredit"] },
+  { title: "Seller services", keys: ["boostPrice", "boostDays", "bannerWeeklyPrice", "proMonthlyPrice", "basicActiveDeals", "proActiveDeals"] },
 ];
 
 const KEYS = Object.keys(DEFAULT_SETTINGS) as SettingKey[];
 
-/** Commission is stored in basis points but edited as a percentage. */
+/** Percentages are stored in basis points and baht in satang; both are edited as plain numbers. */
 function toField(key: SettingKey, value: number) {
-  return key === "defaultCommissionRate" ? String(value / 100) : String(value);
+  return SETTING_LIMITS[key].kind ? String(value / 100) : String(value);
 }
 
 function fromField(key: SettingKey, value: string) {
   const number = Number(value);
-  return key === "defaultCommissionRate" ? Math.round(number * 100) : number;
+  return SETTING_LIMITS[key].kind ? Math.round(number * 100) : number;
 }
 
 function SettingsForm({ db }: { db: Db }) {
@@ -45,7 +46,7 @@ function SettingsForm({ db }: { db: Db }) {
           <div className="mt-4 grid gap-4 sm:grid-cols-3">
             {group.keys.map((key) => {
               const limit = SETTING_LIMITS[key];
-              const percent = key === "defaultCommissionRate";
+              const kind = limit.kind;
               return (
                 <label key={key} className="block text-sm font-bold">
                   {limit.label}
@@ -53,16 +54,15 @@ function SettingsForm({ db }: { db: Db }) {
                     <input
                       type="number"
                       inputMode="decimal"
-                      step={percent ? "0.01" : "1"}
+                      step={kind ? "0.01" : "1"}
                       value={values[key]}
                       onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))}
                       className="w-full rounded-xl border border-line px-4 py-3 font-normal outline-none focus:border-brand-500"
                     />
-                    <span className="shrink-0 text-xs font-normal text-muted">{percent ? "%" : limit.unit}</span>
+                    <span className="shrink-0 text-xs font-normal text-muted">{limit.unit}</span>
                   </div>
                   <span className="mt-1 block text-xs font-normal text-subtle">
-                    Default {toField(key, DEFAULT_SETTINGS[key])}
-                    {percent ? "%" : ` ${limit.unit}`}
+                    Default {toField(key, DEFAULT_SETTINGS[key])} {limit.unit}
                   </span>
                 </label>
               );

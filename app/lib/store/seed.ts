@@ -1,6 +1,6 @@
+import { COURIERS, CourierId, quoteShipping } from "../shipping";
 import { HOUR, now } from "./clock";
 import { registerSeeder, TABLE_NAMES } from "./db";
-import { slugify } from "./catalog";
 import { hashPassword } from "./hash";
 import { baht } from "./money";
 import { DEFAULT_SETTINGS } from "./settings";
@@ -61,7 +61,7 @@ const SHOPS: {
     shopName: "Farm Fresh Thai",
     description: "Rice and coffee straight from farmers in Isan and Chiang Rai.",
     deals: ["rice", "coffeebeans"],
-    commissionRate: 800,
+    commissionRate: 25,
     joinedDaysAgo: 60,
   },
   {
@@ -124,15 +124,22 @@ export const DEMO_ACCOUNTS: DemoAccount[] = [
   })),
 ];
 
+/** [icon, name, slug]. The report's launch categories (Section 3.5); slugs stay stable for the seed deals. */
 const CATEGORIES = [
-  ["smartphone", "Electronics"],
-  ["sofa", "Home & Living"],
-  ["beauty", "Beauty"],
-  ["shirt", "Fashion"],
-  ["food", "Food"],
-  ["sports", "Sports"],
-  ["gaming", "Gaming"],
+  ["smartphone", "Electronics", "electronics"],
+  ["sofa", "Home & Living", "home-living"],
+  ["beauty", "Beauty & Health", "beauty"],
+  ["shirt", "Fashion", "fashion"],
+  ["food", "Food & Beverages", "food"],
+  ["sports", "Sports & Outdoors", "sports"],
+  ["gaming", "Toys & Games", "gaming"],
+  ["pet", "Pet Supplies", "pet-supplies"],
 ] as const;
+
+/** Seller stock caps on some deals: a number, or "full" to cap at the units already voted. */
+const STOCK_CAPS: Record<string, number | "full"> = { earbuds: 50, watch: "full", newproduct05: 40 };
+
+const COURIER_ROTATION: CourierId[] = ["flash", "kex", "jt"];
 
 type SeedDeal = {
   key: string;
@@ -156,6 +163,8 @@ type SeedDeal = {
   /** fulfilling deals: every voter paid; these are the shoppers' order states */
   orderStates?: OrderStatus[];
   reviewNote?: string;
+  /** Packed weight of one unit; defaults by category */
+  parcelWeightGrams?: number;
 };
 
 const SEED_DEALS: SeedDeal[] = [
@@ -487,7 +496,8 @@ const SEED_DEALS: SeedDeal[] = [
     ],
     shopperUnits: 9,
     // One state per paying shopper, in order; the demo buyer's order is shipped.
-    orderStates: ["delivered", "delivered", "paid", "paid", "shipped", "disputed"],
+    // The first report was escalated to the admin; the second waits for the seller.
+    orderStates: ["delivered", "delivered", "paid", "paid", "shipped", "disputed", "disputed"],
   },
   {
     key: "blender",
@@ -690,6 +700,26 @@ const SEED_DEALS: SeedDeal[] = [
 const BUYER_VOTES: Record<string, number> = { earbuds: 2, watch: 1, speaker: 1, airfryer: 2, band: 1 };
 
 
+/**
+ * Ids of the seeded deals that start out live. The deadline jobs keep these
+ * open in real time (see keepDemoDealsLive in jobs.ts) so the marketplace is
+ * never empty just because the demo data was created days ago.
+ */
+export const DEMO_LIVE_DEAL_IDS: ReadonlySet<string> = new Set(
+  SEED_DEALS.filter((seed) => seed.status === "live").map((seed) => `deal_${seed.key}`)
+);
+
+/** Typical packed weight of one unit per category, in grams. */
+const CATEGORY_WEIGHT_GRAMS: Record<string, number> = {
+  electronics: 400,
+  "home-living": 2_500,
+  beauty: 300,
+  fashion: 600,
+  food: 1_000,
+  sports: 1_200,
+  gaming: 900,
+};
+
 function accountId(email: string) {
   return `user_${email.split("@")[0].replace(/[^a-z0-9]/g, "")}`;
 }
@@ -715,6 +745,7 @@ export function buildSeed(): Tables {
       phone: "",
       status: "active",
       votingRestrictedUntil: null,
+      referredBy: null,
       createdAt,
     });
   }
@@ -726,6 +757,11 @@ export function buildSeed(): Tables {
       description: "Gadgets and home goods at group prices.",
       applicationStatus: "approved",
       commissionRate: null,
+      // On the Pro plan, so the demo seller can run many deals and see analytics.
+      proUntil: iso(20 * 24),
+      bankAccount: "KBank •••• 4821",
+      payoutHoldAt: null,
+      payoutHoldReason: null,
       rejectionReason: null,
       createdAt,
     },
@@ -735,15 +771,24 @@ export function buildSeed(): Tables {
       description: "Handmade home decor.",
       applicationStatus: "pending",
       commissionRate: null,
+      proUntil: null,
+      bankAccount: null,
+      payoutHoldAt: null,
+      payoutHoldReason: null,
       rejectionReason: null,
       createdAt: iso(-2),
     },
-    ...SHOPS.map((shop) => ({
+    ...SHOPS.map((shop, index) => ({
       id: accountId(shop.email),
       shopName: shop.shopName,
       description: shop.description,
       applicationStatus: "approved" as const,
       commissionRate: shop.commissionRate ?? null,
+      proUntil: null,
+      bankAccount: `SCB •••• ${String(1000 + index * 37).slice(-4)}`,
+      // One seller under review, to show the admin's payout hold.
+      payoutHoldAt: shop.email === "seller-extra20@groupbuy.test" ? iso(-30) : null,
+      payoutHoldReason: shop.email === "seller-extra20@groupbuy.test" ? "Checking several buyer complaints about delivery." : null,
       rejectionReason: null,
       createdAt: iso(-shop.joinedDaysAgo * 24),
     }))
@@ -763,8 +808,7 @@ export function buildSeed(): Tables {
     createdAt,
   });
 
-  CATEGORIES.forEach(([icon, name], index) => {
-    const slug = slugify(name);
+  CATEGORIES.forEach(([icon, name, slug], index) => {
     tables.categories.push({ id: `cat_${slug}`, name, slug, icon, sortOrder: index });
   });
 
@@ -778,9 +822,12 @@ export function buildSeed(): Tables {
   for (const seed of SEED_DEALS) {
     const dealId = `deal_${seed.key}`;
     const hasVoting = !["draft", "pending_review"].includes(seed.status);
+    const sellerId = sellerByDeal.get(seed.key) ?? defaultSellerId;
+    const sellerRate =
+      tables.sellerProfiles.find((row) => row.id === sellerId)?.commissionRate ?? DEFAULT_SETTINGS.defaultCommissionRate;
     const deal: Deal = {
       id: dealId,
-      sellerId: sellerByDeal.get(seed.key) ?? defaultSellerId,
+      sellerId,
       categoryId: `cat_${seed.category}`,
       title: seed.title,
       description: seed.description,
@@ -789,6 +836,10 @@ export function buildSeed(): Tables {
       votingStartsAt: hasVoting ? iso(seed.startsInHours) : null,
       votingEndsAt: hasVoting ? iso(seed.endsInHours) : null,
       maxUnitsPerBuyer: seed.maxUnitsPerBuyer,
+      maxTotalUnits: null,
+      parcelWeightGrams: seed.parcelWeightGrams ?? CATEGORY_WEIGHT_GRAMS[seed.category] ?? 500,
+      // Approved deals have their commission locked, as approveDeal does.
+      commissionRate: hasVoting ? sellerRate : null,
       unitsVotedAtClose: null,
       lockedTierId: null,
       lockedUnitPrice: null,
@@ -838,16 +889,25 @@ export function buildSeed(): Tables {
         buyerId: voterId,
         quantity,
         status: "active",
+        reminders: 0,
         respondedAt: null,
         createdAt: votedAt,
         updatedAt: votedAt,
       });
     });
 
+    const stockCap = STOCK_CAPS[seed.key];
+    if (stockCap !== undefined) {
+      const voted = votes.reduce((sum, [, quantity]) => sum + quantity, 0);
+      deal.maxTotalUnits = stockCap === "full" ? voted : Math.max(stockCap, voted);
+    }
+
     if (["seller_decision", "payment_window", "fulfilling"].includes(seed.status)) {
       lockSeedDeal(tables, deal, seed, t);
     }
   }
+
+  seedGrowth(tables, t);
 
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
     tables.settings.push({ id: key as SettingKey, value });
@@ -882,14 +942,18 @@ function lockSeedDeal(tables: Tables, deal: Deal, seed: SeedDeal, t: number) {
     const respondedAt = iso(decidedHours + 1 + index);
     const total = tier.unitPrice * vote.quantity;
     const orderId = `order_${seed.key}_${index + 1}`;
+    const shipping = quoteShipping({ weightPerUnitGrams: deal.parcelWeightGrams, quantity: vote.quantity, province: "Bangkok" });
+    const rate = deal.commissionRate ?? DEFAULT_SETTINGS.defaultCommissionRate;
+    const paymentFee = Math.round(((total + shipping.fee) * DEFAULT_SETTINGS.paymentFeeRate) / 10_000);
+    const courier = COURIER_ROTATION[index % COURIER_ROTATION.length];
     Object.assign(vote, { status: "paid", respondedAt, updatedAt: respondedAt });
     tables.payments.push({
       id: `pay_${seed.key}_${index + 1}`,
       orderId,
-      provider: "mock",
-      providerRef: `mock_seed_${seed.key}_${index + 1}`,
+      provider: "2c2p",
+      providerRef: `2c2p_seed_${seed.key}_${index + 1}`,
       method: index % 2 ? "card" : "promptpay",
-      amount: total,
+      amount: total + shipping.fee,
       status: "succeeded",
       createdAt: respondedAt,
     });
@@ -906,8 +970,13 @@ function lockSeedDeal(tables: Tables, deal: Deal, seed: SeedDeal, t: number) {
       quantity: vote.quantity,
       unitPrice: tier.unitPrice,
       total,
-      commissionRate: DEFAULT_SETTINGS.defaultCommissionRate,
-      commissionAmount: Math.round((total * DEFAULT_SETTINGS.defaultCommissionRate) / 10_000),
+      shippingFee: shipping.fee,
+      shippingCarrier: shipping.carrier,
+      paymentFee,
+      creditUsed: 0,
+      courier: status !== "paid" ? courier : null,
+      commissionRate: rate,
+      commissionAmount: Math.round((total * rate) / 10_000),
       refundedAmount: 0,
       shippingAddress: isBuyer
         ? {
@@ -929,7 +998,7 @@ function lockSeedDeal(tables: Tables, deal: Deal, seed: SeedDeal, t: number) {
             postalCode: "10330",
           },
       status,
-      trackingNumber: shipped ? `TH${String(4_810_000 + index * 137).padStart(10, "0")}` : null,
+      trackingNumber: shipped ? `${COURIERS[courier].prefix}${String(4_810_000 + index * 137).padStart(10, "0")}` : null,
       shippedAt: shipped ? shippedAt : null,
       deliveredAt: status === "delivered" ? deliveredAt : null,
       payableAt: status === "delivered" ? deliveredAt : null,
@@ -946,21 +1015,51 @@ function lockSeedDeal(tables: Tables, deal: Deal, seed: SeedDeal, t: number) {
       const order = makeOrder(vote, index, states[index] ?? "paid");
       tables.orders.push(order);
       if (order.status === "disputed") {
-        // A damaged-item dispute on a delivered order, for the admin queue.
         Object.assign(order, { deliveredAt: order.shippedAt, payableAt: null });
-        tables.disputes.push({
+        const first = !tables.disputes.some((row) => row.orderId.startsWith(`order_${seed.key}_`));
+        const base = {
           id: `dispute_${seed.key}_${index + 1}`,
           orderId: order.id,
           openedBy: vote.buyerId,
-          reason: "damaged",
-          details: "The strap arrived snapped and the screen has a crack.",
-          status: "open",
-          orderStatusBefore: "delivered",
+          orderStatusBefore: "delivered" as const,
           resolution: null,
           resolvedAt: null,
           refundAmount: null,
-          createdAt: iso(decidedHours + 110),
-        });
+          resolvedBy: null,
+        };
+        if (first) {
+          // Escalated: the buyer turned down the seller's partial refund, so it's in the admin queue.
+          tables.disputes.push({
+            ...base,
+            reason: "damaged",
+            details: "The strap arrived snapped and the screen has a crack.",
+            status: "escalated",
+            respondBy: null,
+            sellerOfferAmount: Math.round(order.total * 0.2),
+            sellerMessage: "Sorry about that. We can refund 20% for the strap; the screen crack looks like wear.",
+            sellerRespondedAt: new Date(t - 40 * HOUR).toISOString(),
+            escalatedAt: new Date(t - 30 * HOUR).toISOString(),
+            escalationReason: "buyer_rejected",
+            buyerNote: "The band arrived broken in the box. I want a full refund.",
+            createdAt: new Date(t - 60 * HOUR).toISOString(),
+          });
+        } else {
+          // Waiting for the seller, who has 3 days to answer (2 left).
+          tables.disputes.push({
+            ...base,
+            reason: "wrong_item",
+            details: "I received the black band but ordered the blue one.",
+            status: "seller_review",
+            respondBy: new Date(t + 2 * 24 * HOUR).toISOString(),
+            sellerOfferAmount: null,
+            sellerMessage: null,
+            sellerRespondedAt: null,
+            escalatedAt: null,
+            escalationReason: null,
+            buyerNote: null,
+            createdAt: new Date(t - 24 * HOUR).toISOString(),
+          });
+        }
       }
     });
     const buyerVote = votes.find((vote) => vote.buyerId === "user_buyer");
@@ -983,13 +1082,93 @@ function lockSeedDeal(tables: Tables, deal: Deal, seed: SeedDeal, t: number) {
   });
 }
 
+/**
+ * Simulated growth features: reviews on delivered orders, a referral credit
+ * for the demo buyer, Product Boosts, a sponsored banner and Pro plans.
+ */
+function seedGrowth(tables: Tables, t: number) {
+  const iso = (offsetHours: number) => new Date(t + offsetHours * HOUR).toISOString();
+  const comments = [
+    [5, "Arrived in two days and works perfectly. Great price for the group."],
+    [4, "Good quality. Packaging could be better, but happy overall."],
+    [5, "Second time buying from this shop. Recommended!"],
+    [3, "Okay for the price. Strap feels a bit cheap."],
+  ] as const;
+  tables.orders
+    .filter((order) => order.status === "delivered")
+    .forEach((order, index) => {
+      const [rating, comment] = comments[index % comments.length];
+      tables.reviews.push({
+        id: `review_seed_${index + 1}`,
+        orderId: order.id,
+        dealId: order.dealId,
+        sellerId: order.sellerId,
+        buyerId: order.buyerId,
+        rating,
+        comment,
+        createdAt: iso(-20 - index * 5),
+      });
+    });
+  // A few older reviews so more shops show a rating.
+  const extra: [string, number, string][] = [
+    ["user_sellerhome", 5, "Air fryer from Baan Living is excellent. Fast delivery."],
+    ["user_sellerbeauty", 4, "Genuine products, well packed."],
+    ["user_sellersports", 5, "Dumbbells arrived safely, great group price."],
+  ];
+  extra.forEach(([sellerId, rating, comment], index) => {
+    if (tables.sellerProfiles.some((row) => row.id === sellerId)) {
+      tables.reviews.push({
+        id: `review_seed_extra_${index + 1}`,
+        orderId: `order_history_${index + 1}`,
+        dealId: "",
+        sellerId,
+        buyerId: "user_shopper2",
+        rating,
+        comment,
+        createdAt: iso(-24 * (40 + index * 6)),
+      });
+    }
+  });
+
+  // Shopper 2 joined through the demo buyer's invite link and paid a first order: ฿10 each.
+  const credit = DEFAULT_SETTINGS.referralCredit;
+  const friend = tables.profiles.find((row) => row.id === "user_shopper2");
+  if (friend) {
+    friend.referredBy = "user_buyer";
+    tables.credits.push(
+      { id: "credit_seed_1", userId: "user_shopper2", amount: credit, reason: "referral_friend", relatedId: "user_buyer", createdAt: iso(-72) },
+      { id: "credit_seed_2", userId: "user_buyer", amount: credit, reason: "referral_inviter", relatedId: "user_shopper2", createdAt: iso(-72) }
+    );
+  }
+
+  const purchase = (id: string, sellerId: string, kind: "boost" | "banner" | "pro", dealId: string | null, amount: number, startH: number, endH: number) => {
+    if (kind !== "pro" && !tables.deals.some((deal) => deal.id === dealId && deal.sellerId === sellerId)) {
+      return;
+    }
+    tables.sellerPurchases.push({ id, sellerId, kind, dealId, amount, startsAt: iso(startH), endsAt: iso(endH), createdAt: iso(startH) });
+  };
+  purchase("buy_seed_pro", "user_seller", "pro", null, DEFAULT_SETTINGS.proMonthlyPrice, -10 * 24, 20 * 24);
+  purchase("buy_seed_boost_1", "user_seller", "boost", "deal_earbuds", DEFAULT_SETTINGS.boostPrice, -24, 2 * 24);
+  const homeDeal = tables.deals.find((deal) => deal.sellerId === "user_sellerhome" && deal.status === "live");
+  if (homeDeal) {
+    purchase("buy_seed_boost_2", "user_sellerhome", "boost", homeDeal.id, DEFAULT_SETTINGS.boostPrice, -12, 60);
+    purchase("buy_seed_banner", "user_sellerhome", "banner", homeDeal.id, DEFAULT_SETTINGS.bannerWeeklyPrice, -2 * 24, 5 * 24);
+  }
+  const beautyPro = tables.sellerProfiles.find((row) => row.id === "user_sellerbeauty");
+  if (beautyPro) {
+    beautyPro.proUntil = iso(15 * 24);
+    purchase("buy_seed_pro_2", "user_sellerbeauty", "pro", null, DEFAULT_SETTINGS.proMonthlyPrice, -15 * 24, 15 * 24);
+  }
+}
+
 /** A starting inbox for each demo role, matching the seeded deals. */
 function seedNotifications(tables: Tables, t: number) {
   const iso = (offsetHours: number) => new Date(t + offsetHours * HOUR).toISOString();
   const airfryer = tables.deals.find((deal) => deal.id === "deal_airfryer");
   const buyerAirfryer = tables.votes.find((vote) => vote.id === "vote_airfryer_user_buyer");
   const buyerBand = tables.orders.find((order) => order.dealId === "deal_band" && order.buyerId === "user_buyer");
-  const disputed = tables.disputes[0];
+  const escalated = tables.disputes.find((row) => row.status === "escalated");
+  const sellerReview = tables.disputes.find((row) => row.status === "seller_review");
   const rows: [string, string, Record<string, unknown>, number, boolean][] = [
     // [userId, type, payload, hours ago, read]
     ["user_buyer", "payment_requested", {
@@ -999,13 +1178,15 @@ function seedNotifications(tables: Tables, t: number) {
       paymentDeadline: airfryer?.paymentDeadline,
     }, 22, false],
     ["user_buyer", "order_shipped", { orderId: buyerBand?.id, trackingNumber: buyerBand?.trackingNumber }, 48, false],
+    ["user_buyer", "referral_reward", { amount: DEFAULT_SETTINGS.referralCredit, friend: true, friendName: "Nat" }, 72, false],
     ["user_seller", "decision_needed", { dealId: "deal_speaker", units: 19 }, 2, false],
-    ["user_seller", "dispute_opened", { orderId: disputed?.orderId, reason: "damaged" }, 30, false],
+    ["user_seller", "dispute_opened", { orderId: sellerReview?.orderId, reason: "wrong_item", respondBy: sellerReview?.respondBy }, 24, false],
+    ["user_seller", "dispute_escalated", { orderId: escalated?.orderId, reason: "buyer_rejected" }, 30, true],
     ["user_seller", "order_paid", { dealId: "deal_airfryer", orderId: "order_airfryer_1", quantity: 1 }, 21, true],
     ["user_seller", "deal_approved", { dealId: "deal_earbuds" }, 5 * 24, true],
     ["user_admin", "seller_applied", { sellerId: "user_pendingseller", shopName: "Ploy Crafts" }, 2, false],
     ["user_admin", "deal_submitted", { dealId: "deal_blender" }, 20, false],
-    ["user_admin", "dispute_opened", { orderId: disputed?.orderId, reason: "damaged" }, 30, false],
+    ["user_admin", "dispute_escalated", { orderId: escalated?.orderId, reason: "buyer_rejected" }, 30, false],
   ];
   rows.forEach(([userId, type, payload, hoursAgo, read], index) => {
     tables.notifications.push({

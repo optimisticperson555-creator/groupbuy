@@ -5,7 +5,7 @@ import { useMemo } from "react";
 import DealCard from "../components/deals/DealCard";
 import Icon from "../components/shell/Icon";
 import { EmptyState, Skeleton, SkeletonCards } from "../components/ui";
-import { marketplaceDeals, useDb } from "../lib/store";
+import { formatTHB, marketplaceDeals, useDb } from "../lib/store";
 
 function categoryHref(slug: string | null, q: string) {
   const params = new URLSearchParams();
@@ -84,6 +84,41 @@ export function CategoryNav({ active, q, variant }: { active: string | null; q: 
   );
 }
 
+/** Sponsored home-page banners booked by sellers (simulated paid placement). */
+function SponsoredBanner() {
+  const db = useDb();
+  const sponsored = useMemo(() => (db ? marketplaceDeals(db).filter((summary) => summary.sponsored && !summary.closedReason) : []), [db]);
+  if (sponsored.length === 0) {
+    return null;
+  }
+  return (
+    <div className="mb-8 grid gap-4 md:grid-cols-2">
+      {sponsored.slice(0, 2).map((summary) => (
+        <Link
+          key={summary.deal.id}
+          href={`/deals/${summary.deal.id}`}
+          className="group flex items-center gap-4 overflow-hidden rounded-sheet bg-ink p-4 text-white shadow-sm hover:shadow-xl"
+        >
+          <div className="h-24 w-24 shrink-0 overflow-hidden rounded-2xl bg-surface">
+            {summary.cover && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={summary.cover} alt="" className="h-full w-full object-cover motion-safe:transition-transform group-hover:scale-105" />
+            )}
+          </div>
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-brand-300">Sponsored · {summary.shopName}</p>
+            <p className="mt-1 line-clamp-2 text-lg font-extrabold leading-snug">{summary.deal.title}</p>
+            <p className="mt-1 text-sm text-brand-200">
+              {summary.currentTier ? formatTHB(summary.currentTier.unitPrice) : ""}
+              {summary.nextTier && summary.unitsToNextTier ? ` · ${summary.unitsToNextTier} more to unlock ${formatTHB(summary.nextTier.unitPrice)}` : ""}
+            </p>
+          </div>
+        </Link>
+      ))}
+    </div>
+  );
+}
+
 export function DealGrid({ q, category }: { q: string; category: string | null }) {
   const db = useDb();
   const result = useMemo(() => {
@@ -107,6 +142,7 @@ export function DealGrid({ q, category }: { q: string; category: string | null }
 
   return (
     <>
+      {!q && !category && <SponsoredBanner />}
       <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-brand-500">

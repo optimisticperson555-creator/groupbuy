@@ -66,7 +66,10 @@ export default function VotePanel({
   const { deal, tiers, units, closedReason } = summary;
   const myVote = db && user ? voteFor(db, deal.id, user.id) : undefined;
   const activeVote = myVote?.status === "active" ? myVote : undefined;
-  const max = deal.maxUnitsPerBuyer ?? NO_LIMIT_MAX;
+  // The seller's stock cap: this buyer can take what's left plus their own current vote.
+  const stockMax = summary.unitsLeft === null ? Infinity : summary.unitsLeft + (myVote?.status === "active" ? myVote.quantity : 0);
+  const max = Math.max(1, Math.min(deal.maxUnitsPerBuyer ?? NO_LIMIT_MAX, stockMax));
+  const soldOutForMe = stockMax === 0;
 
   const [quantity, setQuantity] = useState(activeVote?.quantity ?? 1);
   const [error, setError] = useState("");
@@ -133,6 +136,18 @@ export default function VotePanel({
     );
   }
 
+  if (soldOutForMe) {
+    return (
+      <div className={box}>
+        <p className="font-extrabold">This deal is full</p>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          The seller&apos;s stock of {deal.maxTotalUnits} units is all taken. If someone withdraws their vote, units open
+          up again before voting closes.
+        </p>
+      </div>
+    );
+  }
+
   // Units if this buyer's vote changes to `quantity`.
   const unitsAfter = units - (activeVote?.quantity ?? 0) + quantity;
   const priceAfter = tierForUnits(tiers, unitsAfter)?.unitPrice ?? 0;
@@ -183,6 +198,11 @@ export default function VotePanel({
         <QuantityStepper value={quantity} max={max} onChange={(value) => { setQuantity(value); setSaved(""); }} />
         <p className="text-xs text-muted">
           {deal.maxUnitsPerBuyer ? `Up to ${deal.maxUnitsPerBuyer} per buyer` : "No limit per buyer"}
+          {summary.unitsLeft !== null && (
+            <span className="block font-semibold text-brand-600">
+              {summary.unitsLeft} of {deal.maxTotalUnits} units left
+            </span>
+          )}
         </p>
       </div>
 

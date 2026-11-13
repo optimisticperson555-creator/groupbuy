@@ -36,6 +36,17 @@ export default function DealCard({
             {savingPercent}% off
           </span>
         )}
+        {(summary.boosted || summary.sponsored) && (
+          <span className="absolute bottom-3 left-3 inline-flex items-center gap-1 rounded-full bg-ink/85 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm">
+            <Icon name="rocket" className="h-3.5 w-3.5" />
+            {summary.sponsored ? "Sponsored" : "Boosted"}
+          </span>
+        )}
+        {summary.full && (
+          <span className="absolute bottom-3 right-3 rounded-full bg-surface px-2.5 py-1 text-[11px] font-bold text-danger shadow-sm">
+            Full
+          </span>
+        )}
         {category && (
           <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-surface/90 px-2.5 py-1 text-[11px] font-semibold text-muted-strong shadow-sm backdrop-blur">
             <Icon name={category.icon} className="h-3.5 w-3.5" />
@@ -48,6 +59,11 @@ export default function DealCard({
         <p className="inline-flex items-center gap-1 text-xs font-semibold text-subtle">
           <Icon name="store" className="h-3.5 w-3.5" />
           {summary.shopName}
+          {summary.shopRating.count > 0 && (
+            <span className="ml-1 text-brand-600">
+              ★ {summary.shopRating.average.toFixed(1)} ({summary.shopRating.count})
+            </span>
+          )}
         </p>
 
         <h3 className="mt-1.5 line-clamp-2 font-bold leading-snug">{deal.title}</h3>
@@ -69,6 +85,7 @@ export default function DealCard({
           <span className="inline-flex items-center gap-1">
             <Icon name="users" className="h-3.5 w-3.5" />
             {units} units · {voters} {voters === 1 ? "buyer" : "buyers"}
+            {summary.unitsLeft !== null && summary.unitsLeft > 0 && ` · ${summary.unitsLeft} left`}
           </span>
           {deal.votingEndsAt ? <Countdown until={deal.votingEndsAt} icon /> : <span>Not live yet</span>}
         </div>

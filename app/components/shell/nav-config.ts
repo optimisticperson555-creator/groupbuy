@@ -23,6 +23,8 @@ export const DASHBOARD_NAV: Record<UserRole, NavItem[]> = {
     { label: "New Deal", href: "/seller/create", icon: "plus" },
     { label: "Orders", href: "/seller/orders", icon: "box" },
     { label: "Earnings", href: "/seller/earnings", icon: "wallet" },
+    { label: "Plan & Promote", href: "/seller/plan", icon: "rocket" },
+    { label: "Analytics", href: "/seller/analytics", icon: "chart" },
     { label: "Marketplace", href: "/", icon: "home" },
   ],
   admin: [
@@ -31,6 +33,7 @@ export const DASHBOARD_NAV: Record<UserRole, NavItem[]> = {
     { label: "Deal Review", href: "/admin/deals", icon: "check" },
     { label: "Disputes", href: "/admin/disputes", icon: "alert" },
     { label: "Payouts", href: "/admin/payouts", icon: "wallet" },
+    { label: "Revenue", href: "/admin/revenue", icon: "chart" },
     { label: "Users", href: "/admin/users", icon: "users" },
     { label: "Categories", href: "/admin/categories", icon: "tag" },
     { label: "Settings", href: "/admin/settings", icon: "gear" },

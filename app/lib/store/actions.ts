@@ -3,11 +3,13 @@ import { act } from "./act";
 import { ActionResult, fail } from "./errors";
 import { cancelAtDecision, notifyAdmins, notifyUser } from "./jobs";
 import { CardDetails, charge, PaymentMethod, PROVIDER } from "../payments";
+import { quoteShipping } from "../shipping";
 import { DAY, HOUR, now, nowIso } from "./clock";
 import { Db, mutate, newId, requireDb, Tx } from "./db";
 import { commissionOn, formatTHB } from "./money";
-import { getSetting } from "./settings";
-import { Address, Deal, Satang } from "./types";
+import { activeDealCount, activeDealLimit, creditBalance, isPro, linkReferral, rewardReferral } from "./growth";
+import { dealCommissionRate, getSetting, sellerCommissionRate } from "./settings";
+import { Address, BasisPoints, Deal, Satang } from "./types";
 
 /**
  * Write actions for deals, reviews and votes. Each one checks the signed-in
@@ -32,7 +34,14 @@ export type DealInput = {
   tiers: TierInput[];
   votingDays: number;
   maxUnitsPerBuyer: number | null;
+  /** Stock cap: the most units the seller can supply in total; null for no cap */
+  maxTotalUnits: number | null;
+  /** Weight of one unit, packed, in grams; the courier prices shipping from it */
+  parcelWeightGrams: number;
 };
+
+/** Heaviest parcel per unit a seller can list (50 kg). */
+export const MAX_PARCEL_GRAMS = 50_000;
 
 export type DealField = keyof DealInput;
 export type DealErrors = Partial<Record<DealField, string>> & { tierRows?: Record<number, string> };
@@ -71,6 +80,24 @@ export function validateDeal(db: Db, input: DealInput): DealErrors {
     (!Number.isInteger(input.maxUnitsPerBuyer) || input.maxUnitsPerBuyer < 1)
   ) {
     errors.maxUnitsPerBuyer = "Use a whole number of at least 1, or leave it empty for no limit.";
+  }
+
+  if (input.maxTotalUnits !== null && (!Number.isInteger(input.maxTotalUnits) || input.maxTotalUnits < 1)) {
+    errors.maxTotalUnits = "Use a whole number of at least 1, or leave it empty for no cap.";
+  } else if (
+    input.maxTotalUnits !== null &&
+    input.maxUnitsPerBuyer !== null &&
+    input.maxUnitsPerBuyer > input.maxTotalUnits
+  ) {
+    errors.maxTotalUnits = "The stock cap can't be lower than the limit per buyer.";
+  }
+
+  if (
+    !Number.isInteger(input.parcelWeightGrams) ||
+    input.parcelWeightGrams < 1 ||
+    input.parcelWeightGrams > MAX_PARCEL_GRAMS
+  ) {
+    errors.parcelWeightGrams = "Enter the packed weight of one unit, up to 50 kg.";
   }
 
   const tiers = input.tiers;
@@ -123,6 +150,8 @@ export function dealToInput(db: Db, dealId: string): DealInput | null {
       .map(({ minUnits, unitPrice }) => ({ minUnits, unitPrice })),
     votingDays: deal.votingDays,
     maxUnitsPerBuyer: deal.maxUnitsPerBuyer,
+    maxTotalUnits: deal.maxTotalUnits,
+    parcelWeightGrams: deal.parcelWeightGrams,
   };
 }
 
@@ -179,6 +208,8 @@ export function saveDealDraft(input: DealInput, dealId?: string): ActionResult<s
       categoryId: input.categoryId,
       votingDays: input.votingDays,
       maxUnitsPerBuyer: input.maxUnitsPerBuyer,
+      maxTotalUnits: input.maxTotalUnits,
+      parcelWeightGrams: input.parcelWeightGrams,
     };
 
     return mutate((tx) => {
@@ -198,6 +229,7 @@ export function saveDealDraft(input: DealInput, dealId?: string): ActionResult<s
         sellerId: seller.id,
         ...fields,
         status: "draft",
+        commissionRate: null,
         votingStartsAt: null,
         votingEndsAt: null,
         unitsVotedAtClose: null,
@@ -227,6 +259,14 @@ export function submitDealForReview(dealId: string): ActionResult {
     const input = dealToInput(db, dealId);
     if (!input || hasErrors(validateDeal(db, input))) {
       fail("Fix the highlighted problems before submitting.");
+    }
+    const limit = activeDealLimit(db, seller.id);
+    if (activeDealCount(db, seller.id) >= limit) {
+      fail(
+        isPro(db, seller.id)
+          ? `You already have ${limit} deals in review or live, the most a Pro plan allows.`
+          : `The Basic plan allows ${limit} deals in review or live at once. Upgrade to Pro for more.`
+      );
     }
     mutate((tx) => {
       tx.update("deals", dealId, { status: "pending_review" });
@@ -320,16 +360,25 @@ function dealInReview(db: Db, dealId: string): Deal {
   return deal;
 }
 
-/** Puts the deal live; the voting period starts now. */
-export function approveDeal(dealId: string): ActionResult {
+/**
+ * Puts the deal live; the voting period starts now. The commission is locked
+ * here: `commissionRate` is the admin's per-deal rate, or null to use the
+ * seller's rate (or the platform default). It never changes afterwards.
+ */
+export function approveDeal(dealId: string, commissionRate: BasisPoints | null = null): ActionResult {
   return act(() => {
     const db = requireDb();
     auth(db).admin();
     const deal = dealInReview(db, dealId);
+    if (commissionRate !== null && (!Number.isInteger(commissionRate) || commissionRate < 0 || commissionRate > 5000)) {
+      fail("Commission must be between 0% and 50%.");
+    }
+    const lockedRate = commissionRate ?? sellerCommissionRate(db, deal.sellerId);
     const start = now();
     mutate((tx) => {
       tx.update("deals", dealId, {
         status: "live",
+        commissionRate: lockedRate,
         reviewNote: null,
         votingStartsAt: new Date(start).toISOString(),
         votingEndsAt: new Date(start + deal.votingDays * DAY).toISOString(),
@@ -395,6 +444,15 @@ export function castVote(dealId: string, quantity: number): ActionResult {
     }
 
     const existing = db.votes.find((vote) => vote.dealId === dealId && vote.buyerId === buyer.id);
+    if (deal.maxTotalUnits !== null) {
+      const others = db.votes
+        .filter((vote) => vote.dealId === dealId && vote.status === "active" && vote.buyerId !== buyer.id)
+        .reduce((sum, vote) => sum + vote.quantity, 0);
+      const left = Math.max(0, deal.maxTotalUnits - others);
+      if (quantity > left) {
+        fail(left === 0 ? "This deal is full: the seller's stock is all taken." : `Only ${left} ${left === 1 ? "unit is" : "units are"} left on this deal.`);
+      }
+    }
     const at = nowIso();
     mutate((tx) => {
       if (existing) {
@@ -406,11 +464,13 @@ export function castVote(dealId: string, quantity: number): ActionResult {
           buyerId: buyer.id,
           quantity,
           status: "active",
+          reminders: 0,
           respondedAt: null,
           createdAt: at,
           updatedAt: at,
         });
       }
+      linkReferral(tx, buyer.id);
     });
     return undefined;
   });
@@ -532,9 +592,17 @@ function voteAwaitingPayment(db: Db, buyerId: string, dealId: string) {
   return { deal, vote };
 }
 
-export type PayInput = { method: PaymentMethod; addressId: string; card?: CardDetails };
+export type PayInput = {
+  method: PaymentMethod;
+  addressId: string;
+  card?: CardDetails;
+  /** TrueMoney Wallet phone number */
+  walletPhone?: string;
+  /** Spend the buyer's referral credit on this order */
+  useCredit?: boolean;
+};
 
-/** Charges the full voted quantity at the locked price and creates the order. */
+/** Charges the full voted quantity at the locked price, plus the courier's shipping quote, and creates the order. */
 export function payForVote(dealId: string, input: PayInput): ActionResult<string> {
   return act(() => {
     const db = requireDb();
@@ -550,7 +618,19 @@ export function payForVote(dealId: string, input: PayInput): ActionResult<string
     }
 
     const total = unitPrice * vote.quantity;
-    const result = charge({ method: input.method, amount: total, card: input.card });
+    const shipping = quoteShipping({
+      weightPerUnitGrams: deal.parcelWeightGrams,
+      quantity: vote.quantity,
+      province: address.province,
+    });
+    const charged = total + shipping.fee;
+    // Referral credit is paid by the platform; the gateway charges the rest.
+    const creditUsed = input.useCredit ? Math.min(creditBalance(db, buyer.id), charged) : 0;
+    const toCharge = charged - creditUsed;
+    const result =
+      toCharge > 0
+        ? charge({ method: input.method, amount: toCharge, card: input.card, walletPhone: input.walletPhone })
+        : ({ ok: true, providerRef: "credit_only" } as const);
     const at = nowIso();
 
     if (!result.ok) {
@@ -562,7 +642,7 @@ export function payForVote(dealId: string, input: PayInput): ActionResult<string
           provider: PROVIDER,
           providerRef: "",
           method: input.method,
-          amount: total,
+          amount: toCharge,
           status: "failed",
           createdAt: at,
         });
@@ -570,8 +650,10 @@ export function payForVote(dealId: string, input: PayInput): ActionResult<string
       fail(result.error);
     }
 
-    const sellerRate = db.sellerProfiles.find((row) => row.id === deal.sellerId)?.commissionRate;
-    const commissionRate = sellerRate ?? getSetting(db, "defaultCommissionRate");
+    const commissionRate = dealCommissionRate(db, deal);
+    // 2C2P's fee on what it processed, passed through to the seller (report Section 5.4).
+    const paymentFee = commissionOn(toCharge, getSetting(db, "paymentFeeRate"));
+    const paidAt = now();
     const orderId = newId("order");
     const { recipient, phone, line1, line2, district, province, postalCode } = address;
 
@@ -585,6 +667,11 @@ export function payForVote(dealId: string, input: PayInput): ActionResult<string
         quantity: vote.quantity,
         unitPrice,
         total,
+        shippingFee: shipping.fee,
+        shippingCarrier: shipping.carrier,
+        paymentFee,
+        creditUsed,
+        courier: null,
         commissionRate,
         commissionAmount: commissionOn(total, commissionRate),
         refundedAmount: 0,
@@ -603,10 +690,14 @@ export function payForVote(dealId: string, input: PayInput): ActionResult<string
         provider: PROVIDER,
         providerRef: result.providerRef,
         method: input.method,
-        amount: total,
+        amount: toCharge,
         status: "succeeded",
         createdAt: at,
       });
+      if (creditUsed > 0) {
+        tx.insert("credits", { id: newId("credit"), userId: buyer.id, amount: -creditUsed, reason: "spent", relatedId: orderId, createdAt: at });
+      }
+      rewardReferral(tx, buyer.id, paidAt);
       tx.update("votes", vote.id, { status: "paid", respondedAt: at, updatedAt: at });
       notifyUser(tx, deal.sellerId, "order_paid", { dealId, orderId, quantity: vote.quantity });
     });

@@ -25,12 +25,14 @@ All five build phases (Part 3) are done. The app is a **frontend-only demo**: ev
 | Data store (only code that touches `localStorage`) | `app/lib/store/` (import from `app/lib/store`, the index) |
 | Tables and row types | `app/lib/store/types.ts`; schema version in `db.ts` |
 | Rules: deals, review, voting, decision, payment | `app/lib/store/actions.ts` |
-| Rules: shipping, delivery, disputes, refunds, payouts, commission, settings | `app/lib/store/fulfilment.ts` |
+| Rules: shipping, delivery, disputes, refunds, payouts, commission, settings | `app/lib/store/fulfilment.ts`; refund/escalation core shared with the jobs in `dispute-core.ts` |
+| Admin revenue per seller | `app/lib/store/revenue.ts`, page `/admin/revenue` |
 | Deadline jobs | `app/lib/store/jobs.ts`, run by `app/components/DeadlineRunner.tsx` and before every action |
 | Notifications text and links | `app/lib/store/notifications.ts` |
 | Categories | `app/lib/store/catalog.ts` |
 | Demo seed data and accounts | `app/lib/store/seed.ts` |
 | Payment provider (mock) | `app/lib/payments/` |
+| Courier shipping quotes (mock) | `app/lib/shipping/` |
 | Layouts and navigation | `app/components/shell/` (`nav-config.ts` lists every role's pages) |
 | Design tokens | `app/globals.css` |
 
@@ -43,9 +45,12 @@ All five build phases (Part 3) are done. The app is a **frontend-only demo**: ev
 ## Known limitations
 
 - Data is per browser: different devices or browsers don't see each other's deals.
+- Seeded live deals never close in real time: when their deadline passes they roll over to a new voting period (`keepDemoDealsLive` in `jobs.ts`). Moving the dev clock forward still closes them. Deals created by users close normally.
 - Passwords are SHA-256 hashed but this is not real security.
 - Payments, refunds and payouts are mocked and succeed instantly (test card `4000 0000 0000 0002` is declined).
+- Shipping is quoted by a mock courier (`app/lib/shipping/`): a rate table by parcel weight and the buyer's region (Bangkok and nearby vs. other provinces). It ignores the seller's location. Swap in a real courier API there.
 - Images are picked from `public/assets/` or pasted as URLs; there is no upload.
+- **Simulated report features** (so the prototype matches the final report): payments "processed by 2C2P" with PromptPay, card and TrueMoney Wallet; a 2C2P payment fee deducted from the seller's payout; shipping labels for Flash, KEX and J&T that generate tracking numbers; referral credits (฿10 each when an invited friend pays a first order, spent at payment, paid by the platform); 1–5 star reviews after delivery with shop ratings; Product Boost (boosted deals listed first), sponsored home-page banners and a Pro plan (more active deals, `/seller/analytics`) bought on `/seller/plan`; payment reminders shown as "sent by LINE and email". Code: `app/lib/store/growth.ts`, `app/lib/payments/`, `app/lib/shipping/`. No real money, messages or labels.
 - `@supabase/supabase-js` is still listed in `package.json` but unused.
 
 ---
@@ -60,7 +65,7 @@ Every account has exactly **one** role. An account can never be both buyer and s
 | ---------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Buyer**  | Self sign-up                                                               | Browse deals, vote with a quantity, confirm and pay at the final price, track orders, confirm delivery                                               |
 | **Seller** | Self sign-up as seller, then **admin approval** before they can list deals | Create deals with price tiers and a voting period, decide Proceed/Cancel after voting, ship each order, see earnings                                 |
-| **Admin**  | Created manually (never through public sign-up)                            | Approve sellers and deals, set commission per seller, manage users, handle disputes and refunds, manage categories and settings, view platform stats |
+| **Admin**  | Created manually (never through public sign-up)                            | Approve sellers and deals, set commission (platform, per seller, per deal), manage users, decide escalated problem reports, manage categories and settings, view platform stats and revenue per seller |
 
 A seller whose application is pending or rejected can log in but cannot create deals.
 
@@ -72,8 +77,8 @@ draft → pending_review → live → seller_decision → payment_window → ful
            rejected                cancelled
 ```
 
-1. **Draft**: the seller creates the deal: title, description, images, category, price tiers, voting period, optional max units per buyer.
-2. **Pending review**: the admin approves or rejects the deal. A rejected deal goes back to the seller with a reason and can be edited and resubmitted.
+1. **Draft**: the seller creates the deal: title, description, images, category, price tiers, packed parcel weight per unit, voting period, optional max units per buyer.
+2. **Pending review**: the admin approves or rejects the deal, and may set a **per-deal commission rate** while approving. A rejected deal goes back to the seller with a reason and can be edited and resubmitted.
 3. **Live (voting)**: buyers vote with a quantity. No money moves.
 4. **Deadline**: voting closes and the system **locks the price** from the total units voted.
 5. **Seller decision**: the seller chooses **Proceed** or **Cancel deal**. No buyer has paid yet, so cancelling costs nobody money.
@@ -92,10 +97,11 @@ draft → pending_review → live → seller_decision → payment_window → ful
 
 - Voting is free and needs no payment details.
 - A buyer picks a **quantity**, and every unit counts toward the tier.
-- The seller may set an optional **max units per buyer**. There is **no stock cap**: voting stays open until the deadline.
+- The seller may set an optional **max units per buyer** and an optional **stock cap** (`maxTotalUnits`, the most units they can supply). When votes reach the cap the deal shows **Full** and accepts no more units; units open up again if someone withdraws. Voting still closes only at the deadline, and the price locks only then.
 - While the deal is live, a buyer can change their quantity or withdraw the vote.
 - A buyer with an active voting restriction (see "No-show tracking") cannot vote.
 - The deal page shows live progress: units voted, the current price, units needed to unlock the next tier, and a countdown.
+- **Invite link:** every live deal has a share box (`app/components/deals/ShareDeal.tsx`) on the deal page and the seller's deal page: copy link, LINE, Facebook, and the phone's share sheet (Instagram, TikTok…) or copy message. Signed-in users get a personal link (`/deals/<id>?ref=<userId>`); opening it shows "X invited you". Referral rewards are not credited yet.
 
 ## Seller decision (after the deadline)
 
@@ -131,13 +137,43 @@ The status box is for information only; it never changes the price.
 
 - The seller ships each paid order to that buyer's address and enters tracking information if available.
 - The buyer confirms delivery. Delivery is auto-confirmed after a set number of days if the buyer hasn't opened a dispute.
-- After delivery is confirmed, the order becomes payable to the seller: **order total minus the seller's commission**.
-- Refunds happen only for problems (not delivered, damaged, wrong item) and are handled by the admin through disputes.
+- After delivery is confirmed, the order becomes payable to the seller: **product total minus refunds minus commission**. Shipping goes to the courier, never to the seller.
+- Refunds happen only for problems (not delivered, damaged, wrong item), through problem reports (below).
+
+## Shipping
+
+- The seller **never sets a shipping fee**. They enter the **packed weight of one unit** on the deal.
+- At payment the courier quotes **one parcel for the whole order** (weight per unit × quantity) to the buyer's chosen address. The buyer pays it **on top of** the product price; the payment step shows products, shipping and the total.
+- Deal pages show "+ shipping from ฿X" (the cheapest quote for one unit) so buyers know before voting.
+- **No commission on shipping.**
+
+## Problem reports (disputes)
+
+The seller handles reports first; the admin is the backup.
+
+```
+Buyer reports a problem → seller_review (seller has 3 days)
+   seller offers a full refund        → resolved straight away
+   seller offers a partial refund, or replies without a refund → awaiting_buyer (buyer has 3 days)
+       buyer accepts                  → resolved
+       buyer rejects (with a note)    → escalated → admin decides (final)
+       buyer doesn't answer           → resolved: the seller's offer stands
+   seller doesn't answer in 3 days    → escalated → admin decides (final)
+```
+
+- Only the seller is notified when a report opens. Admins are notified only on escalation.
+- The seller page suggests a full refund for not delivered, damaged and wrong item, and a partial refund for "something else".
+- The response time is the `disputeResponseDays` setting (default 3), used for both the seller and the buyer step.
+- An open report (any status except `resolved`) pauses payout and auto-confirmation, as before.
+- **Refund money:** refunds come out of the product total first, then shipping. A **full refund includes shipping** and marks the order `refunded`. Commission is recalculated on the product amount the seller keeps.
 
 ## Commission
 
-- The admin sets a platform default commission rate and can override it for each seller.
-- Each order **stores the commission rate at the moment of payment**, so changing a seller's rate later never changes past earnings.
+- Three levels, most specific wins: **per deal** → **per seller** → **platform default**.
+- The admin can set a per-deal rate while approving the deal. Leaving it empty uses the seller's rate (or the default). The rate is **locked on the deal when it goes live** and never changes afterwards, even if the seller's rate changes.
+- In the deal editor the seller sees, read-only, the commission and "you receive" per unit for each tier (at their current rate; confirmed at approval).
+- Each order copies the deal's rate at payment. Commission is charged on the product total only, never on shipping.
+- The admin **Revenue** page shows, per seller and per deal: sales, refunds, commission earned, owed and paid to the seller, and shipping passed to the courier, for this month, last month or all time.
 
 ## Admin settings (configurable, with defaults)
 
@@ -145,10 +181,15 @@ The status box is for information only; it never changes the price.
 | -------------------------------------- | ---------------------------- |
 | Voting period allowed                  | 1–14 days (seller default 7) |
 | Seller decision window                 | 12 hours                     |
-| Buyer payment window                   | 48 hours                     |
+| Buyer payment window                   | 24 hours (reminders at 12 h and 2 h left) |
 | No-show limit / lookback / restriction | 3 / 90 days / 30 days        |
 | Auto-confirm delivery after            | 7 days                       |
-| Default commission rate                | 10%                          |
+| Time to answer a problem report        | 3 days (seller, then buyer)  |
+| Default commission rate                | 0.5% (the report's introductory rate) |
+| 2C2P payment fee (passed to seller)    | 2.5% (planning assumption)   |
+| Referral credit, each person           | ฿10                          |
+| Product Boost / banner / Pro plan      | ฿200 per 3 days / ฿1,500 per week / ฿590 per month |
+| Deals in review or live at once        | Basic 3, Pro 10              |
 
 The defaults are starting values, not final business decisions. Store them in a settings table, never hardcode them.
 
@@ -193,7 +234,7 @@ All use password `groupbuy123`. The login page lists only the first four; the de
 | `seller-home@groupbuy.test` | Seller | Baan Living | Home & Living deals |
 | `seller-beauty@groupbuy.test` | Seller | Glow Lab Beauty | Beauty deals |
 | `seller-fashion@groupbuy.test` | Seller | Urban Thread | Fashion deals |
-| `seller-food@groupbuy.test` | Seller | Farm Fresh Thai | Food deals; custom 8% commission |
+| `seller-food@groupbuy.test` | Seller | Farm Fresh Thai | Food deals; custom 0.25% commission |
 | `seller-sports@groupbuy.test` | Seller | FitLife Sports | Sports deals |
 | `seller-gaming@groupbuy.test` | Seller | Level Up Gaming | Gaming deals |
 | `shopper1@` – `shopper11@groupbuy.test` | Buyer | – | Demo shoppers whose votes and orders fill the deals |
@@ -207,15 +248,15 @@ All use password `groupbuy123`. The login page lists only the first four; the de
 | `seller_profiles` | `user_id`, `shop_name`, `description`, `application_status` (pending/approved/rejected/suspended), `commission_rate` (nullable, null = platform default), `rejection_reason`                                                                           |
 | `addresses`       | `user_id`, recipient, phone, address lines, `is_default`                                                                                                                                                                                               |
 | `categories`      | `id`, `name`, `slug`, `sort_order`                                                                                                                                                                                                                     |
-| `deals`           | `id`, `seller_id`, `category_id`, `title`, `description`, `status`, `voting_starts_at`, `voting_ends_at`, `max_units_per_buyer`, `units_voted_at_close`, `locked_tier_id`, `locked_unit_price`, `decision_deadline`, `payment_deadline`, `review_note` |
+| `deals`           | `id`, `seller_id`, `category_id`, `title`, `description`, `status`, `voting_starts_at`, `voting_ends_at`, `max_units_per_buyer`, `parcel_weight_grams`, `commission_rate` (locked at approval), `units_voted_at_close`, `locked_tier_id`, `locked_unit_price`, `decision_deadline`, `payment_deadline`, `review_note` |
 | `deal_images`     | `deal_id`, `storage_path`, `sort_order`                                                                                                                                                                                                                |
 | `deal_tiers`      | `deal_id`, `min_units`, `max_units` (null for the top tier), `unit_price`                                                                                                                                                                              |
 | `votes`           | `deal_id`, `buyer_id`, `quantity`, `status` (active/withdrawn/paid/declined/expired/cancelled), `responded_at`; one vote per buyer per deal                                                                                                            |
-| `orders`          | `vote_id`, `deal_id`, `buyer_id`, `seller_id`, `quantity`, `unit_price`, `total`, `commission_rate`, `commission_amount`, `shipping_address` (snapshot), `status` (paid/shipped/delivered/disputed/refunded), `tracking_number`, `delivered_at`        |
+| `orders`          | `vote_id`, `deal_id`, `buyer_id`, `seller_id`, `quantity`, `unit_price`, `total` (products only), `shipping_fee`, `shipping_carrier`, `commission_rate`, `commission_amount`, `refunded_amount`, `shipping_address` (snapshot), `status` (paid/shipped/delivered/disputed/refunded), `tracking_number`, `delivered_at` |
 | `payments`        | `order_id`, `provider`, `provider_ref`, `method` (promptpay/card), `amount`, `status`                                                                                                                                                                  |
 | `payouts`         | `seller_id`, `amount`, `status`, `paid_at`; linked to the orders it covers                                                                                                                                                                             |
 | `no_show_events`  | `buyer_id`, `deal_id`, `created_at`                                                                                                                                                                                                                    |
-| `disputes`        | `order_id`, `opened_by`, `reason`, `status`, `resolution`, `refund_amount`                                                                                                                                                                             |
+| `disputes`        | `order_id`, `opened_by`, `reason`, `status` (seller_review/awaiting_buyer/escalated/resolved), `respond_by`, `seller_offer_amount`, `seller_message`, `escalation_reason`, `buyer_note`, `resolved_by`, `resolution`, `refund_amount` |
 | `notifications`   | `user_id`, `type`, `payload`, `read_at`                                                                                                                                                                                                                |
 | `settings`        | `key`, `value` (the admin settings above)                                                                                                                                                                                                              |
 
@@ -227,6 +268,7 @@ There is no server, so these run **lazily**: the store runs every due transition
 
 - **Close voting** at `voting_ends_at`: compute total units and the locked tier and price, move to `seller_decision`, notify the seller.
 - **Seller decision timeout**: what happens is an open decision (see below).
+- **Problem-report deadlines** at `respond_by`: a seller who hasn't answered → escalated; a buyer who hasn't answered → the seller's offer stands.
 - **Close the payment window** at `payment_deadline`: mark unanswered votes `expired`, write `no_show_events`, apply voting restrictions, move the deal to `fulfilling`.
 - **Auto-confirm delivery** after the configured number of days.
 - **Payout eligibility**: mark delivered, undisputed orders as payable.
@@ -239,9 +281,9 @@ There is no server, so these run **lazily**: the store runs every due transition
 
 **Buyer:** my votes (live / waiting for payment / done) · confirm-and-pay screen · orders and tracking · confirm delivery / open a dispute · addresses · notifications · account (including no-show status).
 
-**Seller:** application status · dashboard (live deals, decisions waiting, orders to ship, earnings) · create and edit deal with a tier editor and live preview · deal detail (votes, Proceed/Cancel, payment status, orders) · orders to ship · earnings and payouts · shop profile.
+**Seller:** application status · dashboard (live deals, decisions waiting, orders to ship, earnings) · create and edit deal with a tier editor (read-only commission per tier), parcel weight and live preview · deal detail (votes, Proceed/Cancel, payment status, orders) · orders to ship and problem reports to answer (`/seller/orders`) · earnings and payouts · shop profile.
 
-**Admin:** dashboard (stats, items waiting) · seller applications · deal review queue · users (search, suspend, no-show counts, lift restrictions) · sellers (commission rate, cancellation rate) · disputes and refunds · payouts · categories · settings.
+**Admin:** dashboard (stats, items waiting) · seller applications · deal review queue (per-deal commission) · users (search, suspend, no-show counts, lift restrictions) · sellers (commission rate, cancellation rate) · problem reports (escalated ones to decide) · payouts · revenue per seller · categories · settings.
 
 ## Phases
 
@@ -264,9 +306,9 @@ There is no server, so these run **lazily**: the store runs every due transition
 - **Seller decision timeout:** auto-cancel (the default until decided otherwise). It is recorded separately from cancellations the seller chose.
 - **Shipping** is allowed for any paid order, including during the payment window.
 - **Payable** as soon as delivery is confirmed (by the buyer, or automatically `autoConfirmDeliveryDays` after `shippedAt`). An open dispute pauses this.
-- **Disputes** can be opened on paid, shipped or delivered orders until the order is paid out; one open dispute per order.
-- **Refunds and commission:** commission is charged only on what the seller keeps: after a refund it is recalculated on `total - refundedAmount`, so a full refund leaves the seller ฿0 and the platform ฿0. *(Default chosen while building; confirm with the business.)* A full refund marks the order `refunded`; a partial or no refund returns it to its status before the dispute.
-- **Payouts** are one transfer per seller covering every payable order, mocked as paid instantly.
+- **Disputes** can be opened on paid, shipped or delivered orders until the order is paid out; one open dispute per order. See "Problem reports" in Part 2 for who answers when.
+- **Refunds and commission:** commission is charged only on the product amount the seller keeps (`total - min(refundedAmount, total)`), so a full refund leaves the seller ฿0 and the platform ฿0. The shipping part of a full refund is absorbed by the platform. *(Default chosen while building; confirm with the business.)* A full refund (products + shipping) marks the order `refunded`; a partial or no refund returns it to its status before the dispute.
+- **Payouts are automatic** (2C2P split payment, simulated): a deadline job releases every payable order (delivered, no open report) to its seller as one payout per order: product total minus refunds, commission and the payment fee. The admin no longer pays by hand; `/admin/payouts` monitors payouts and lets the admin **hold** and **release** a seller (`holdPayouts` / `releasePayouts`). A seller without a bank account gets a `failed` payout record; it is retried automatically once they add one on `/seller/earnings` (`setBankAccount`).
 - A **fulfilling** deal becomes `completed` once every order is delivered or refunded and no dispute is open.
 
 - **Selling is not advertised publicly.** There is no "Sell on GroupBuy" promotion in the marketplace; sellers sign up through the account-type choice on `/register` and are then approved by an admin.
@@ -277,4 +319,3 @@ There is no server, so these run **lazily**: the store runs every due transition
 - **Payment provider:** mocked for this upgrade. For a real launch: Stripe (with Connect, for paying sellers) or Opn Payments (Omise). Check the provider's marketplace and Thai requirements before choosing.
 - **Seller doesn't answer within the decision window:** auto-cancel or auto-proceed. Auto-cancel is the default until decided.
 - **Reviews and ratings:** not in scope yet.
-- **Delivery fees:** who sets them and whether they're included in the price.

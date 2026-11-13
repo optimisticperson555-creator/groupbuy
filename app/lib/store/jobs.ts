@@ -1,7 +1,12 @@
 import { DAY, HOUR, now } from "./clock";
 import { mutate, newId, subscribe, Tx } from "./db";
+import { escalateDispute, sellerNet, settleDispute } from "./dispute-core";
+import { notifyAdmins, notifyUser } from "./notify";
+import { DEMO_LIVE_DEAL_IDS } from "./seed";
 import { getSetting } from "./settings";
 import { Deal, Order } from "./types";
+
+export { notifyAdmins, notifyUser };
 
 /**
  * Deadline jobs (CLAUDE.md, "Scheduled jobs"). There is no server, so they run
@@ -17,24 +22,6 @@ function settings(tx: Tx) {
 
 function iso(ms: number) {
   return new Date(ms).toISOString();
-}
-
-export function notifyUser(tx: Tx, userId: string, type: string, payload: Record<string, unknown>, at = now()) {
-  tx.insert("notifications", {
-    id: newId("ntf"),
-    userId,
-    type,
-    payload,
-    readAt: null,
-    createdAt: iso(at),
-  });
-}
-
-/** Notifies every admin, e.g. when something lands in a review queue. */
-export function notifyAdmins(tx: Tx, type: string, payload: Record<string, unknown>, at = now()) {
-  for (const profile of tx.all("profiles").filter((row) => row.role === "admin")) {
-    notifyUser(tx, profile.id, type, payload, at);
-  }
 }
 
 function activeVotes(tx: Tx, dealId: string) {
@@ -111,7 +98,36 @@ function closePaymentWindow(tx: Tx, deal: Deal, at: number) {
 }
 
 function hasOpenDispute(tx: Tx, orderId: string) {
-  return tx.all("disputes").some((dispute) => dispute.orderId === orderId && dispute.status === "open");
+  return tx.all("disputes").some((dispute) => dispute.orderId === orderId && dispute.status !== "resolved");
+}
+
+/**
+ * Problem-report deadlines: a seller who doesn't answer in time sends the case
+ * to an admin; a buyer who doesn't answer the seller's offer accepts it.
+ */
+function runDisputeDeadlines(tx: Tx, at: number): number {
+  let ran = 0;
+  for (const dispute of tx.all("disputes")) {
+    if (!dispute.respondBy || Date.parse(dispute.respondBy) > at) {
+      continue;
+    }
+    const due = Date.parse(dispute.respondBy);
+    if (dispute.status === "seller_review") {
+      escalateDispute(tx, dispute, "seller_timeout", due);
+      ran++;
+    } else if (dispute.status === "awaiting_buyer") {
+      settleDispute(
+        tx,
+        dispute,
+        dispute.sellerOfferAmount ?? 0,
+        dispute.sellerMessage ?? "The buyer didn't answer the seller's offer in time.",
+        "buyer_timeout",
+        due
+      );
+      ran++;
+    }
+  }
+  return ran;
 }
 
 /** Delivery confirmed (by the buyer or automatically): the order becomes payable to the seller. */
@@ -158,8 +174,127 @@ function completeFulfilledDeals(tx: Tx, at: number): number {
   return ran;
 }
 
+/**
+ * Seeded demo deals roll over to a new voting period instead of closing when
+ * their deadline passes in real time, so the marketplace always has live
+ * deals. It uses the real clock, not now(): moving the dev clock forward
+ * still closes them, so deadline testing works as before.
+ */
+function keepDemoDealsLive(tx: Tx) {
+  const realNow = Date.now();
+  for (const deal of tx.all("deals")) {
+    if (deal.status !== "live" || !DEMO_LIVE_DEAL_IDS.has(deal.id) || !deal.votingEndsAt || !deal.votingStartsAt) {
+      continue;
+    }
+    const endsAt = Date.parse(deal.votingEndsAt);
+    if (endsAt > realNow) {
+      continue;
+    }
+    const period = Math.max(deal.votingDays, 1) * DAY;
+    const shift = Math.ceil((realNow - endsAt + 1) / period) * period;
+    tx.update("deals", deal.id, {
+      votingStartsAt: iso(Date.parse(deal.votingStartsAt) + shift),
+      votingEndsAt: iso(endsAt + shift),
+    });
+  }
+}
+
+/** Hours before the payment deadline when unanswered voters are reminded. */
+export const REMINDER_HOURS = [12, 2];
+
+/**
+ * Payment reminders "by LINE and email" (simulated: they arrive as
+ * notifications marked with those channels). Each vote gets each reminder once.
+ */
+function sendPaymentReminders(tx: Tx, at: number): number {
+  let ran = 0;
+  for (const deal of tx.all("deals")) {
+    if (deal.status !== "payment_window" || !deal.paymentDeadline) {
+      continue;
+    }
+    const deadline = Date.parse(deal.paymentDeadline);
+    if (at >= deadline) {
+      continue;
+    }
+    for (const vote of tx.all("votes").filter((row) => row.dealId === deal.id && row.status === "active")) {
+      const due = REMINDER_HOURS.filter((hours) => at >= deadline - hours * HOUR).length;
+      if (due > (vote.reminders ?? 0)) {
+        const hoursLeft = REMINDER_HOURS[due - 1];
+        tx.update("votes", vote.id, { reminders: due });
+        notifyUser(tx, vote.buyerId, "payment_reminder", {
+          dealId: deal.id,
+          hoursLeft,
+          paymentDeadline: deal.paymentDeadline,
+          channels: ["LINE", "email"],
+        }, at);
+        ran++;
+      }
+    }
+  }
+  return ran;
+}
+
+/**
+ * Automatic payouts (2C2P split payment, simulated): every payable order is
+ * released to its seller, minus commission and the payment fee. Sellers on an
+ * admin hold are skipped; sellers without a bank account get one "failed"
+ * record per order, retried automatically once they add an account.
+ */
+function releasePayouts(tx: Tx, at: number): number {
+  let ran = 0;
+  const paidBySeller = new Map<string, number>();
+  for (const order of tx.all("orders")) {
+    if (order.status !== "delivered" || !order.payableAt || order.payoutId || hasOpenDispute(tx, order.id)) {
+      continue;
+    }
+    const seller = tx.find("sellerProfiles", order.sellerId);
+    if (!seller || seller.payoutHoldAt) {
+      continue;
+    }
+    const releasedAt = new Date(Math.max(Date.parse(order.payableAt), Date.parse(seller.createdAt))).toISOString();
+    const amount = sellerNet(order);
+    if (!seller.bankAccount) {
+      const alreadyFailed = tx.all("payouts").some((row) => row.orderId === order.id && row.status === "failed");
+      if (!alreadyFailed) {
+        tx.insert("payouts", {
+          id: newId("payout"),
+          sellerId: order.sellerId,
+          orderId: order.id,
+          amount,
+          status: "failed",
+          failureReason: "No bank account on file",
+          paidAt: null,
+          createdAt: releasedAt,
+        });
+        notifyUser(tx, order.sellerId, "payout_failed", { amount }, at);
+        ran++;
+      }
+      continue;
+    }
+    const id = newId("payout");
+    tx.insert("payouts", {
+      id,
+      sellerId: order.sellerId,
+      orderId: order.id,
+      amount,
+      status: "paid",
+      failureReason: null,
+      paidAt: releasedAt,
+      createdAt: releasedAt,
+    });
+    tx.update("orders", order.id, { payoutId: id });
+    paidBySeller.set(order.sellerId, (paidBySeller.get(order.sellerId) ?? 0) + amount);
+    ran++;
+  }
+  for (const [sellerId, amount] of paidBySeller) {
+    notifyUser(tx, sellerId, "payout_sent", { amount }, at);
+  }
+  return ran;
+}
+
 /** Runs every due job inside an existing mutate(). Returns how many ran. */
 export function runDueJobs(tx: Tx, at: number): number {
+  keepDemoDealsLive(tx);
   let ran = 0;
   // Each pass can make the next deadline due (e.g. voting closes, then the
   // decision window also ends), so repeat until nothing changes.
@@ -183,7 +318,10 @@ export function runDueJobs(tx: Tx, at: number): number {
       break;
     }
   }
+  ran += runDisputeDeadlines(tx, at);
+  ran += sendPaymentReminders(tx, at);
   ran += autoConfirmDeliveries(tx, at);
+  ran += releasePayouts(tx, at);
   ran += completeFulfilledDeals(tx, at);
   return ran;
 }

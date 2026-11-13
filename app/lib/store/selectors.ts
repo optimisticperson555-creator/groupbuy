@@ -1,6 +1,7 @@
 import { votingClosedReason } from "./actions";
 import { now } from "./clock";
 import { Db } from "./db";
+import { activeBanner, activeBoost, Rating, sellerRating } from "./growth";
 import { getSetting } from "./settings";
 import { Category, Deal, DealTier, Order, Vote } from "./types";
 
@@ -52,6 +53,13 @@ export type DealSummary = {
   shopName: string;
   /** null while buyers can vote */
   closedReason: string | null;
+  /** Units still open under the seller's stock cap; null when there's no cap */
+  unitsLeft: number | null;
+  /** Stock cap reached: no new units can be voted */
+  full: boolean;
+  boosted: boolean;
+  sponsored: boolean;
+  shopRating: Rating;
 };
 
 export function dealSummary(db: Db, deal: Deal, at = now()): DealSummary {
@@ -67,6 +75,7 @@ export function dealSummary(db: Db, deal: Deal, at = now()): DealSummary {
   const next = nextTier(tiers, units);
   const basePrice = tiers[0]?.unitPrice ?? 0;
 
+  const unitsLeft = deal.maxTotalUnits === null ? null : Math.max(0, deal.maxTotalUnits - units);
   return {
     deal,
     tiers,
@@ -83,6 +92,11 @@ export function dealSummary(db: Db, deal: Deal, at = now()): DealSummary {
     category: db.categories.find((category) => category.id === deal.categoryId),
     shopName: db.sellerProfiles.find((seller) => seller.id === deal.sellerId)?.shopName ?? "GroupBuy seller",
     closedReason: votingClosedReason(deal, at),
+    unitsLeft,
+    full: unitsLeft === 0,
+    boosted: Boolean(activeBoost(db, deal.id, at)),
+    sponsored: Boolean(activeBanner(db, deal.id, at)),
+    shopRating: sellerRating(db, deal.sellerId),
   };
 }
 
@@ -99,6 +113,10 @@ export function marketplaceDeals(db: Db): DealSummary[] {
     .sort((a, b) => {
       if (Boolean(a.closedReason) !== Boolean(b.closedReason)) {
         return a.closedReason ? 1 : -1;
+      }
+      // Product Boost: boosted deals show first among open deals.
+      if (a.boosted !== b.boosted) {
+        return a.boosted ? -1 : 1;
       }
       return Date.parse(a.deal.votingEndsAt ?? "") - Date.parse(b.deal.votingEndsAt ?? "");
     });

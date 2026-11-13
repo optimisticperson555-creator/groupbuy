@@ -5,7 +5,7 @@ import { useMemo } from "react";
 import DealStatusPill from "../components/deals/DealStatusPill";
 import Icon from "../components/shell/Icon";
 import { PageHeader, Skeleton, StatCard } from "../components/ui";
-import { DealStatus, formatTHB, marketplaceDeals, payableOrders, sellerNet, useDb } from "../lib/store";
+import { DealStatus, formatTHB, marketplaceDeals, payableOrders, sellerKeeps, sellerNet, useDb } from "../lib/store";
 
 const STATUS_ORDER: DealStatus[] = [
   "pending_review",
@@ -33,12 +33,12 @@ export default function AdminDashboard() {
       units: live.reduce((sum, summary) => sum + summary.units, 0),
       buyers: db.profiles.filter((profile) => profile.role === "buyer").length,
       sellers: db.sellerProfiles.filter((seller) => seller.applicationStatus === "approved").length,
-      openDisputes: db.disputes.filter((dispute) => dispute.status === "open").length,
+      openDisputes: db.disputes.filter((dispute) => dispute.status === "escalated").length,
       payable: db.sellerProfiles.reduce(
         (sum, seller) => sum + payableOrders(db, seller.id).reduce((total, order) => total + sellerNet(order), 0),
         0
       ),
-      gmv: db.orders.reduce((sum, order) => sum + order.total - order.refundedAmount, 0),
+      gmv: db.orders.reduce((sum, order) => sum + sellerKeeps(order), 0),
       commission: db.orders.reduce((sum, order) => sum + order.commissionAmount, 0),
       byStatus: STATUS_ORDER.map((status) => [status, db.deals.filter((deal) => deal.status === status).length] as const),
     };
@@ -47,7 +47,7 @@ export default function AdminDashboard() {
   const waiting = [
     { href: "/admin/sellers", label: "Seller applications", count: stats?.pendingSellers, icon: "store" as const },
     { href: "/admin/deals", label: "Deals to review", count: stats?.pendingDeals, icon: "check" as const },
-    { href: "/admin/disputes", label: "Open disputes", count: stats?.openDisputes, icon: "alert" as const },
+    { href: "/admin/disputes", label: "Reports to decide", count: stats?.openDisputes, icon: "alert" as const },
   ];
 
   return (
@@ -83,7 +83,7 @@ export default function AdminDashboard() {
           <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success-50 text-success-600" aria-hidden="true">
             <Icon name="banknote" className="h-6 w-6" />
           </span>
-          <span className="flex-1 font-bold">Payouts due</span>
+          <span className="flex-1 font-bold">Payouts held or failed</span>
           {stats ? (
             <span className="text-sm font-extrabold text-success-600">{formatTHB(stats.payable)}</span>
           ) : (

@@ -4,11 +4,13 @@ import { useParams } from "next/navigation";
 import { FormEvent, useMemo, useState } from "react";
 import Countdown from "../../../components/deals/Countdown";
 import { BackLink, EmptyState, Skeleton } from "../../../components/ui";
-import { IconName } from "../../../components/shell/Icon";
-import { PaymentMethod, TEST_CARDS } from "../../../lib/payments";
+import Icon, { IconName } from "../../../components/shell/Icon";
+import { PaymentMethod, PROVIDER_LABEL, TEST_CARDS } from "../../../lib/payments";
+import { formatWeight, quoteShipping, ZONE_LABELS } from "../../../lib/shipping";
 import {
   addAddress,
   AddressInput,
+  creditBalance,
   declinePayment,
   findDealSummary,
   formatTHB,
@@ -87,6 +89,8 @@ export default function PayPage() {
 
   const [method, setMethod] = useState<PaymentMethod>("promptpay");
   const [card, setCard] = useState({ number: "", expiry: "", cvc: "" });
+  const [walletPhone, setWalletPhone] = useState("");
+  const [useCredit, setUseCredit] = useState(true);
   const [chosenAddress, setChosenAddress] = useState<string | null>(null);
   const [addingAddress, setAddingAddress] = useState(false);
   const [address, setAddress] = useState(EMPTY_ADDRESS);
@@ -107,6 +111,7 @@ export default function PayPage() {
       addresses,
       order: vote ? orderForVote(db, vote.id) : undefined,
       noShows: noShowStatus(db, user.id),
+      credit: creditBalance(db, user.id),
     };
   }, [db, user, dealId]);
 
@@ -118,7 +123,7 @@ export default function PayPage() {
     );
   }
 
-  const { summary, vote, addresses, order, noShows } = data;
+  const { summary, vote, addresses, order, noShows, credit } = data;
   const deal = summary?.deal;
   const addressId = chosenAddress ?? addresses[0]?.id ?? null;
   const open =
@@ -134,7 +139,7 @@ export default function PayPage() {
 
   if (!open) {
     const messages: Record<string, [IconName, string, string]> = {
-      paid: ["party", "Payment confirmed", order ? `You paid ${formatTHB(order.total)} for ${order.quantity} × ${deal.title}. The seller will ship it to you.` : "The seller will ship your order."],
+      paid: ["party", "Payment confirmed", order ? `You paid ${formatTHB(order.total + order.shippingFee)} (including ${formatTHB(order.shippingFee)} shipping) for ${order.quantity} × ${deal.title}. The seller will ship it to you.` : "The seller will ship your order."],
       declined: ["wave", "You declined this deal", "No problem. Declining never counts against you."],
       expired: ["hourglass", "The payment window closed", "You didn't confirm in time, so this counts as a missed confirmation."],
       cancelled: ["ban", "The seller cancelled this deal", "Nobody was charged."],
@@ -160,6 +165,14 @@ export default function PayPage() {
   const unitPrice = deal.lockedUnitPrice ?? 0;
   const total = unitPrice * vote.quantity;
   const fullPrice = (summary.tiers[0]?.unitPrice ?? unitPrice) * vote.quantity;
+  // The courier quotes one parcel for the whole order, to the chosen address.
+  const shipTo = addresses.find((row) => row.id === addressId);
+  const shipping = shipTo
+    ? quoteShipping({ weightPerUnitGrams: deal.parcelWeightGrams, quantity: vote.quantity, province: shipTo.province })
+    : null;
+  const beforeCredit = total + (shipping?.fee ?? 0);
+  const creditApplied = useCredit ? Math.min(credit, beforeCredit) : 0;
+  const grandTotal = beforeCredit - creditApplied;
 
   function saveAddress() {
     const result = addAddress(address);
@@ -179,7 +192,13 @@ export default function PayPage() {
       setError("Add a delivery address first.");
       return;
     }
-    const result = payForVote(dealId, { method, addressId, card: method === "card" ? card : undefined });
+    const result = payForVote(dealId, {
+      method,
+      addressId,
+      card: method === "card" ? card : undefined,
+      walletPhone: method === "truemoney" ? walletPhone : undefined,
+      useCredit,
+    });
     setError(result.ok ? "" : result.error);
   }
 
@@ -274,12 +293,19 @@ export default function PayPage() {
 
           {/* METHOD */}
           <section className="rounded-sheet bg-surface p-6 shadow-sm">
-            <h2 className="text-lg font-extrabold">Payment method</h2>
-            <div role="radiogroup" aria-label="Payment method" className="mt-4 grid grid-cols-2 gap-2 rounded-2xl bg-surface-muted p-1.5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="text-lg font-extrabold">Payment method</h2>
+              <span className="inline-flex items-center gap-1 text-xs font-semibold text-subtle">
+                <Icon name="lock" className="h-3.5 w-3.5" />
+                Secured by {PROVIDER_LABEL} · held until delivery
+              </span>
+            </div>
+            <div role="radiogroup" aria-label="Payment method" className="mt-4 grid grid-cols-3 gap-2 rounded-2xl bg-surface-muted p-1.5">
               {(
                 [
                   ["promptpay", "PromptPay"],
                   ["card", "Card"],
+                  ["truemoney", "TrueMoney"],
                 ] as const
               ).map(([value, label]) => (
                 <button
@@ -298,12 +324,29 @@ export default function PayPage() {
             {method === "promptpay" ? (
               <div className="mt-5 flex flex-col items-center text-center">
                 <div className="rounded-2xl border border-line p-3 text-ink">
-                  <MockQr seed={`${dealId}-${vote.id}-${total}`} />
+                  <MockQr seed={`${dealId}-${vote.id}-${grandTotal}`} />
                 </div>
                 <p className="mt-3 text-sm text-muted">
-                  Scan with your banking app to pay <b className="text-ink">{formatTHB(total)}</b>.
+                  Scan with your banking app to pay <b className="text-ink">{formatTHB(grandTotal)}</b>.
                 </p>
                 <p className="mt-1 text-xs text-subtle">Demo: press the button below to simulate a completed transfer.</p>
+              </div>
+            ) : method === "truemoney" ? (
+              <div className="mt-5">
+                <label className="block text-xs font-bold text-muted-strong">
+                  TrueMoney Wallet phone number
+                  <input
+                    value={walletPhone}
+                    onChange={(event) => setWalletPhone(event.target.value)}
+                    inputMode="tel"
+                    autoComplete="tel"
+                    placeholder="08X XXX XXXX"
+                    className={inputClass}
+                  />
+                </label>
+                <p className="mt-2 text-xs text-subtle">
+                  Demo: any 10-digit number starting with 0. In the live app you confirm the payment in the TrueMoney app.
+                </p>
               </div>
             ) : (
               <div className="mt-5 grid grid-cols-2 gap-3">
@@ -377,9 +420,41 @@ export default function PayPage() {
                   <dd className="font-bold">{formatTHB(fullPrice - total)}</dd>
                 </div>
               )}
+              <div className="flex justify-between border-t border-line pt-3">
+                <dt className="text-muted">Products</dt>
+                <dd className="font-bold">{formatTHB(total)}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted">
+                  Shipping
+                  {shipping && (
+                    <span className="block text-xs text-subtle">
+                      {shipping.carrier} · {formatWeight(shipping.weightGrams)} to {ZONE_LABELS[shipping.zone].toLowerCase()} ·{" "}
+                      {shipping.etaDays[0]}–{shipping.etaDays[1]} days
+                    </span>
+                  )}
+                </dt>
+                <dd className="shrink-0 font-bold">{shipping ? formatTHB(shipping.fee) : "Add an address"}</dd>
+              </div>
+              {credit > 0 && (
+                <div className="flex items-center justify-between gap-3 text-success-600">
+                  <dt>
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={useCredit}
+                        onChange={(event) => setUseCredit(event.target.checked)}
+                        className="accent-brand-500"
+                      />
+                      Use referral credit ({formatTHB(credit)})
+                    </label>
+                  </dt>
+                  <dd className="font-bold">{creditApplied > 0 ? `−${formatTHB(creditApplied)}` : "—"}</dd>
+                </div>
+              )}
               <div className="flex justify-between border-t border-line pt-3 text-base">
                 <dt className="font-bold">Total</dt>
-                <dd className="text-xl font-extrabold text-brand-500">{formatTHB(total)}</dd>
+                <dd className="text-xl font-extrabold text-brand-500">{formatTHB(grandTotal)}</dd>
               </div>
             </dl>
 
@@ -389,7 +464,7 @@ export default function PayPage() {
               type="submit"
               className="mt-5 w-full rounded-2xl bg-brand-500 py-4 text-lg font-extrabold text-white shadow-lg shadow-brand-100 hover:bg-brand-600"
             >
-              {method === "promptpay" ? "I've paid" : "Pay"} {formatTHB(total)}
+              {method === "promptpay" ? "I've paid" : "Pay"} {formatTHB(grandTotal)}
             </button>
             <button type="button" onClick={decline} className="mt-3 w-full py-2 text-sm font-bold text-muted hover:text-danger">
               No, cancel

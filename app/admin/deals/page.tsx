@@ -1,14 +1,40 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import DealStatusPill from "../../components/deals/DealStatusPill";
 import { EmptyState, PageHeader, Skeleton } from "../../components/ui";
-import { approveDeal, dealSummary, formatDate, formatTHB, marketplaceDeals, rejectDeal, useDb } from "../../lib/store";
+import { formatWeight } from "../../lib/shipping";
+import {
+  ActionResult,
+  approveDeal,
+  dealCommissionRate,
+  dealSummary,
+  formatDate,
+  formatTHB,
+  marketplaceDeals,
+  percent,
+  rejectDeal,
+  sellerCommissionRate,
+  useDb,
+} from "../../lib/store";
 import ReviewActions from "../ReviewActions";
+
+/** "" means the seller's rate; otherwise a percentage typed by the admin. */
+function approveWithRate(dealId: string, typed: string): ActionResult {
+  if (typed.trim() === "") {
+    return approveDeal(dealId, null);
+  }
+  const value = Number(typed);
+  if (!Number.isFinite(value)) {
+    return { ok: false, error: "Enter the commission as a number, e.g. 8 or 7.5." };
+  }
+  return approveDeal(dealId, Math.round(value * 100));
+}
 
 export default function AdminDealsPage() {
   const db = useDb();
+  const [rates, setRates] = useState<Record<string, string>>({});
 
   const data = useMemo(() => {
     if (!db) {
@@ -65,12 +91,33 @@ export default function AdminDealsPage() {
                   </div>
                   <p className="mt-3 text-xs text-subtle">
                     {summary.deal.votingDays}-day vote ·{" "}
-                    {summary.deal.maxUnitsPerBuyer ? `max ${summary.deal.maxUnitsPerBuyer} per buyer` : "no per-buyer limit"}
+                    {summary.deal.maxUnitsPerBuyer ? `max ${summary.deal.maxUnitsPerBuyer} per buyer` : "no per-buyer limit"} ·{" "}
+                    {formatWeight(summary.deal.parcelWeightGrams)} per unit
                   </p>
                 </div>
                 <div className="lg:w-72">
+                  {db && (
+                    <label className="mb-4 block text-sm font-bold">
+                      Commission for this deal (%)
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        max={50}
+                        step="0.05"
+                        value={rates[summary.deal.id] ?? ""}
+                        onChange={(event) => setRates((current) => ({ ...current, [summary.deal.id]: event.target.value }))}
+                        placeholder={String(sellerCommissionRate(db, summary.deal.sellerId) / 100)}
+                        className="mt-2 w-full rounded-xl border border-line px-4 py-2.5 font-normal outline-none focus:border-brand-500"
+                      />
+                      <span className="mt-1 block text-xs font-normal text-subtle">
+                        Leave empty to use the seller&apos;s rate ({percent(sellerCommissionRate(db, summary.deal.sellerId))}).
+                        Locked once the deal goes live.
+                      </span>
+                    </label>
+                  )}
                   <ReviewActions
-                    onApprove={() => approveDeal(summary.deal.id)}
+                    onApprove={() => approveWithRate(summary.deal.id, rates[summary.deal.id] ?? "")}
                     onReject={(note) => rejectDeal(summary.deal.id, note)}
                     rejectLabel="Request changes"
                     reasonLabel="What should the seller change?"
@@ -100,7 +147,8 @@ export default function AdminDealsPage() {
                   <span className="block text-xs font-normal text-muted">{summary.shopName}</span>
                 </Link>
                 <span className="text-sm text-muted">
-                  {summary.units} units · {summary.currentTier ? formatTHB(summary.currentTier.unitPrice) : "—"}
+                  {summary.units} units · {summary.currentTier ? formatTHB(summary.currentTier.unitPrice) : "—"} ·{" "}
+                  {db ? percent(dealCommissionRate(db, summary.deal)) : ""} commission
                 </span>
                 <DealStatusPill status={summary.deal.status} votingClosed={Boolean(summary.closedReason)} />
               </li>

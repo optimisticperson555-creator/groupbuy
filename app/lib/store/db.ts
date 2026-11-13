@@ -6,7 +6,7 @@ import { Row, TableName, Tables } from "./types";
  */
 
 const PREFIX = "groupbuy_";
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 14;
 const VERSION_KEY = `${PREFIX}schema_version`;
 /** Bumped on every write, so any tab can tell its cache is stale. */
 const REV_KEY = `${PREFIX}rev`;
@@ -28,6 +28,9 @@ export const TABLE_NAMES: TableName[] = [
   "payouts",
   "noShowEvents",
   "disputes",
+  "credits",
+  "reviews",
+  "sellerPurchases",
   "notifications",
   "settings",
 ];
@@ -247,4 +250,19 @@ export function writeClockOffset(offsetMs: number) {
   window.localStorage.setItem(CLOCK_KEY, String(offsetMs));
   writeRev();
   notify();
+}
+
+const REFERRAL_KEY = `${PREFIX}pending_referral`;
+
+/** The inviter from the last invite link opened in this browser, until it's used on a first vote. */
+export function readPendingReferral(): string | null {
+  return typeof window === "undefined" ? null : window.localStorage.getItem(REFERRAL_KEY);
+}
+
+export function writePendingReferral(userId: string | null) {
+  if (userId) {
+    window.localStorage.setItem(REFERRAL_KEY, userId);
+  } else {
+    window.localStorage.removeItem(REFERRAL_KEY);
+  }
 }

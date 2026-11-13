@@ -3,14 +3,18 @@
 import { useRouter } from "next/navigation";
 import { FormEvent, ReactNode, useMemo, useState } from "react";
 import DealCard from "../components/deals/DealCard";
+import { formatWeight, quoteShipping } from "../lib/shipping";
 import {
   baht,
+  commissionOn,
   DealErrors,
   DealInput,
   DealSummary,
   DealTier,
   formatTHB,
   getSetting,
+  percent,
+  sellerCommissionRate,
   hasErrors,
   MAX_TIERS,
   saveDealDraft,
@@ -52,6 +56,9 @@ type FormState = {
   imageSrc: string;
   votingDays: string;
   maxUnitsPerBuyer: string;
+  maxTotalUnits: string;
+  /** Kilograms, as typed */
+  parcelWeightKg: string;
   tiers: TierRow[];
 };
 
@@ -63,6 +70,8 @@ function toForm(input: DealInput): FormState {
     imageSrc: input.imageSrc,
     votingDays: String(input.votingDays),
     maxUnitsPerBuyer: input.maxUnitsPerBuyer === null ? "" : String(input.maxUnitsPerBuyer),
+    maxTotalUnits: input.maxTotalUnits === null ? "" : String(input.maxTotalUnits),
+    parcelWeightKg: input.parcelWeightGrams > 0 ? String(input.parcelWeightGrams / 1000) : "",
     tiers: input.tiers.map((tier) => ({ minUnits: String(tier.minUnits), price: String(tier.unitPrice / 100) })),
   };
 }
@@ -76,6 +85,8 @@ function toInput(form: FormState): DealInput {
     imageSrc: form.imageSrc,
     votingDays: number(form.votingDays),
     maxUnitsPerBuyer: form.maxUnitsPerBuyer.trim() === "" ? null : number(form.maxUnitsPerBuyer),
+    maxTotalUnits: form.maxTotalUnits.trim() === "" ? null : number(form.maxTotalUnits),
+    parcelWeightGrams: Math.round(number(form.parcelWeightKg) * 1000),
     // The first tier always starts at 1 unit; the editor locks that field.
     tiers: form.tiers.map((tier, index) => ({
       minUnits: index === 0 ? 1 : number(tier.minUnits),
@@ -137,6 +148,9 @@ export default function DealEditor({ dealId, initial }: { dealId?: string; initi
         votingStartsAt: null,
         votingEndsAt: null,
         maxUnitsPerBuyer: input.maxUnitsPerBuyer,
+        maxTotalUnits: input.maxTotalUnits,
+        parcelWeightGrams: input.parcelWeightGrams,
+        commissionRate: null,
         unitsVotedAtClose: null,
         lockedTierId: null,
         lockedUnitPrice: null,
@@ -158,6 +172,11 @@ export default function DealEditor({ dealId, initial }: { dealId?: string; initi
       category: db.categories.find((category) => category.id === input.categoryId),
       shopName: user?.shopName ?? "Your shop",
       closedReason: "Preview",
+      unitsLeft: input.maxTotalUnits,
+      full: false,
+      boosted: false,
+      sponsored: false,
+      shopRating: { average: 0, count: 0 },
     };
   }, [db, input, user]);
 
@@ -168,6 +187,15 @@ export default function DealEditor({ dealId, initial }: { dealId?: string; initi
   const minDays = getSetting(db, "votingPeriodMinDays");
   const maxDays = getSetting(db, "votingPeriodMaxDays");
   const categories = [...db.categories].sort((a, b) => a.sortOrder - b.sortOrder);
+  // Drafts and rejected deals have no locked rate yet: show what the seller pays today.
+  const commissionRate = sellerCommissionRate(db, user?.id ?? "");
+  const weightOk = Number.isInteger(input.parcelWeightGrams) && input.parcelWeightGrams > 0;
+  const sampleQuotes = weightOk
+    ? (["Bangkok", "Chiang Mai"] as const).map((province) => ({
+        province,
+        quote: quoteShipping({ weightPerUnitGrams: input.parcelWeightGrams, quantity: 1, province }),
+      }))
+    : [];
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -309,6 +337,11 @@ export default function DealEditor({ dealId, initial }: { dealId?: string; initi
             The price drops as buyers vote for more units. The first tier starts at 1 unit, and each tier must be
             cheaper than the one before.
           </p>
+          <p className="mt-3 rounded-xl bg-surface-subtle px-4 py-3 text-xs text-muted">
+            GroupBuy&apos;s commission is <span className="font-bold text-ink">{percent(commissionRate)}</span> of the
+            product price. The rate is set by GroupBuy and locked when an admin approves the deal. Shipping is paid
+            by the buyer and isn&apos;t part of the commission.
+          </p>
 
           <div className="mt-5 space-y-3">
             {form.tiers.map((tier, index) => {
@@ -363,6 +396,25 @@ export default function DealEditor({ dealId, initial }: { dealId?: string; initi
                       />
                     </label>
                   </div>
+                  {(() => {
+                    const unitPrice = input.tiers[index]?.unitPrice ?? 0;
+                    if (unitPrice <= 0) {
+                      return null;
+                    }
+                    const commission = commissionOn(unitPrice, commissionRate);
+                    return (
+                      <dl className="mt-3 grid grid-cols-2 gap-3 rounded-xl bg-surface-subtle px-4 py-3 text-xs">
+                        <div>
+                          <dt className="text-subtle">Platform commission ({percent(commissionRate)})</dt>
+                          <dd className="mt-0.5 font-bold text-muted-strong">−{formatTHB(commission)} per unit</dd>
+                        </div>
+                        <div>
+                          <dt className="text-subtle">You receive</dt>
+                          <dd className="mt-0.5 font-extrabold text-success-700">{formatTHB(unitPrice - commission)} per unit</dd>
+                        </div>
+                      </dl>
+                    );
+                  })()}
                   {rowError && <p className="mt-2 text-xs font-semibold text-danger">{rowError}</p>}
                 </div>
               );
@@ -378,6 +430,47 @@ export default function DealEditor({ dealId, initial }: { dealId?: string; initi
             >
               + Add tier
             </button>
+          )}
+        </section>
+
+        <section className="space-y-5 rounded-sheet bg-surface p-6 shadow-sm sm:p-7">
+          <div>
+            <h2 className="text-lg font-extrabold">Shipping</h2>
+            <p className="mt-1 text-sm text-muted">
+              You don&apos;t set a shipping fee. At checkout the courier quotes the buyer from the parcel weight and
+              their address, and the buyer pays it on top of the price. An order of several units ships as one parcel.
+            </p>
+          </div>
+          <Field
+            label="Packed weight of one unit (kg)"
+            hint="Include the box and packaging. For example 0.4 for earbuds or 5 for a bag of rice."
+            error={shown.parcelWeightGrams}
+          >
+            <input
+              type="number"
+              inputMode="decimal"
+              min={0.001}
+              max={50}
+              step="0.001"
+              value={form.parcelWeightKg}
+              onChange={(event) => set("parcelWeightKg", event.target.value)}
+              aria-invalid={Boolean(shown.parcelWeightGrams)}
+              className={inputClass}
+              placeholder="0.5"
+            />
+          </Field>
+          {sampleQuotes.length > 0 && (
+            <div className="rounded-xl bg-surface-subtle px-4 py-3 text-xs text-muted">
+              <p className="font-bold text-muted-strong">What a buyer pays for shipping on 1 unit ({formatWeight(input.parcelWeightGrams)})</p>
+              <ul className="mt-1 space-y-0.5">
+                {sampleQuotes.map(({ province, quote }) => (
+                  <li key={province} className="flex justify-between">
+                    <span>To {province}</span>
+                    <span className="font-bold text-ink">{formatTHB(quote.fee)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </section>
 
@@ -410,6 +503,22 @@ export default function DealEditor({ dealId, initial }: { dealId?: string; initi
                 aria-invalid={Boolean(shown.maxUnitsPerBuyer)}
                 className={inputClass}
                 placeholder="No limit"
+              />
+            </Field>
+            <Field
+              label="Stock cap (total units)"
+              hint="Optional. The most units you can supply at these prices. When votes reach it, the deal shows as full."
+              error={shown.maxTotalUnits}
+            >
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                value={form.maxTotalUnits}
+                onChange={(event) => set("maxTotalUnits", event.target.value)}
+                aria-invalid={Boolean(shown.maxTotalUnits)}
+                className={inputClass}
+                placeholder="No cap"
               />
             </Field>
           </div>

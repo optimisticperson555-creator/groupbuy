@@ -6,7 +6,18 @@ import Countdown from "../../components/deals/Countdown";
 import TierProgress from "../../components/deals/TierProgress";
 import Icon from "../../components/shell/Icon";
 import { EmptyState, PageHeader, Skeleton, StatCard, StatusPill } from "../../components/ui";
-import { dealSummary, DealSummary, formatTHB, noShowStatus, Order, orderForVote, useDb, useSessionUser, Vote } from "../../lib/store";
+import {
+  creditBalance,
+  dealSummary,
+  DealSummary,
+  formatTHB,
+  noShowStatus,
+  Order,
+  orderForVote,
+  useDb,
+  useSessionUser,
+  Vote,
+} from "../../lib/store";
 import NoShowNotice from "../NoShowNotice";
 
 type Row = { vote: Vote; summary: DealSummary; order: Order | undefined };
@@ -63,7 +74,7 @@ function VoteRow({ row }: { row: Row }) {
           <p className="mt-1 text-sm text-muted">
             {order ? (
               <>
-                Paid <b className="text-ink">{formatTHB(order.total)}</b> for {order.quantity} × {formatTHB(order.unitPrice)}
+                Paid <b className="text-ink">{formatTHB(order.total + order.shippingFee)}</b> for {order.quantity} × {formatTHB(order.unitPrice)} plus shipping
               </>
             ) : (
               <>
@@ -164,6 +175,13 @@ export default function MyGroupsPage() {
   return (
     <div className="mx-auto max-w-6xl px-5 py-8 lg:py-10">
       <PageHeader eyebrow="YOUR VOTES" title="My Groups" text="Track the deals you've voted on and what you'll pay." />
+
+      {db && user && creditBalance(db, user.id) > 0 && (
+        <p className="mt-6 inline-flex items-center gap-2 rounded-2xl bg-success-50 px-4 py-3 text-sm font-semibold text-success-600">
+          <Icon name="gift" className="h-4 w-4" />
+          You have {formatTHB(creditBalance(db, user.id))} referral credit. It&apos;s applied at your next payment.
+        </p>
+      )}
 
       {noShows && (
         <div className="mt-6 empty:hidden">
