@@ -10,6 +10,7 @@ import TierProgress from "../../../components/deals/TierProgress";
 import Icon from "../../../components/shell/Icon";
 import { BackLink, EmptyState, Skeleton, StatCard } from "../../../components/ui";
 import ShareDeal from "../../../components/deals/ShareDeal";
+import DealBuyers from "./DealBuyers";
 import { formatWeight } from "../../../lib/shipping";
 import {
   ActionResult,
@@ -272,6 +273,8 @@ export default function SellerDealPage() {
           </div>
         </>
       )}
+
+      {db && !["draft", "pending_review", "rejected"].includes(deal.status) && <DealBuyers db={db} deal={deal} />}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         <div className="rounded-sheet bg-surface p-6 shadow-sm">

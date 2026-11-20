@@ -67,7 +67,7 @@ Every account has exactly **one** role. An account can never be both buyer and s
 | **Seller** | Self sign-up as seller, then **admin approval** before they can list deals | Create deals with price tiers and a voting period, decide Proceed/Cancel after voting, ship each order, see earnings                                 |
 | **Admin**  | Created manually (never through public sign-up)                            | Approve sellers and deals, set commission (platform, per seller, per deal), manage users, decide escalated problem reports, manage categories and settings, view platform stats and revenue per seller |
 
-A seller whose application is pending or rejected can log in but cannot create deals.
+A seller whose application is pending or rejected can log in but sees only a "waiting for approval" screen (`SellerApprovalGate` in `app/seller/SellerStatusBanner.tsx`) instead of Seller Center, and cannot create deals. Seller Center opens once an admin approves them.
 
 ## Deal lifecycle
 
@@ -132,6 +132,7 @@ The status box is for information only; it never changes the price.
 - The buyer is warned before the limit: "You've missed 2 confirmations. One more will pause voting for 30 days."
 - The admin sees each buyer's no-show count and can lift a restriction early.
 - Sellers never see which buyers no-showed.
+- **Exception (professor's request):** the seller's deal page lists the buyers who joined (`app/seller/deals/[id]/DealBuyers.tsx`): name, units, join time and status. Declined and expired votes both show as "Didn't pay", so no-shows stay hidden. The payment status box still shows counts only.
 
 ## Delivery and payout
 
