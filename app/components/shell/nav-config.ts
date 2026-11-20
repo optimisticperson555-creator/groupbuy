@@ -21,6 +21,7 @@ export const DASHBOARD_NAV: Record<UserRole, NavItem[]> = {
   seller: [
     { label: "Dashboard", href: "/seller", icon: "grid", alsoMatches: ["/seller/deals"] },
     { label: "New Deal", href: "/seller/create", icon: "plus" },
+    { label: "Buyers", href: "/seller/buyers", icon: "users" },
     { label: "Orders", href: "/seller/orders", icon: "box" },
     { label: "Earnings", href: "/seller/earnings", icon: "wallet" },
     { label: "Plan & Promote", href: "/seller/plan", icon: "rocket" },

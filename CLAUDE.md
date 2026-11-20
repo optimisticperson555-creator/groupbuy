@@ -132,7 +132,7 @@ The status box is for information only; it never changes the price.
 - The buyer is warned before the limit: "You've missed 2 confirmations. One more will pause voting for 30 days."
 - The admin sees each buyer's no-show count and can lift a restriction early.
 - Sellers never see which buyers no-showed.
-- **Exception (professor's request):** the seller's deal page lists the buyers who joined (`app/seller/deals/[id]/DealBuyers.tsx`): name, units, join time and status. Declined and expired votes both show as "Didn't pay", so no-shows stay hidden. The payment status box still shows counts only.
+- **Exception (professor's request):** the seller's deal page and the seller's **Buyers** page (`/seller/buyers`, all deals with a deal filter) list the buyers who joined (`app/seller/BuyerList.tsx`): name, units, join time and status. Declined and expired votes both show as "Didn't pay", so no-shows stay hidden. The payment status box still shows counts only.
 
 ## Delivery and payout
 
